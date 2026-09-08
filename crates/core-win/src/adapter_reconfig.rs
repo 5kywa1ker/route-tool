@@ -21,6 +21,18 @@ pub struct AdapterReconfigStrategy {
     store: StateStore,
 }
 
+/// 前缀长度转点分十进制子网掩码。
+pub(crate) fn mask_from_prefix(p: u8) -> Ipv4Addr {
+    match p {
+        0 => Ipv4Addr::UNSPECIFIED,
+        1..=31 => Ipv4Addr::from(u32::MAX << (32 - p)),
+        _ => Ipv4Addr::new(255, 255, 255, 255),
+    }
+}
+
+/// 策略默认子网掩码（用户未配置时使用）。
+const DEFAULT_MASK_PREFIX: u8 = 24;
+
 impl AdapterReconfigStrategy {
     pub fn new(store: StateStore) -> Self {
         Self { store }
@@ -50,7 +62,7 @@ impl AdapterReconfigStrategy {
             netsh::enable_dhcp(&name).await?;
             netsh::reset_dns(&name).await?;
         } else {
-            // 恢复原静态参数。
+            // 恢复原静态参数（掩码取快照记录的真实前缀，缺项按 /24）。
             let ip = snap
                 .static_ipv4
                 .first()
@@ -67,8 +79,12 @@ impl AdapterReconfigStrategy {
                     _ => None,
                 })
                 .ok_or_else(|| CoreError::Network("快照缺少网关".into()))?;
-            // 子网掩码快照按 /24 处理（AdapterSnapshot.static_ipv4_mask 预留扩展位）。
-            let mask = Ipv4Addr::new(255, 255, 255, 0);
+            let mask = mask_from_prefix(
+                snap.static_ipv4_mask
+                    .first()
+                    .copied()
+                    .unwrap_or(DEFAULT_MASK_PREFIX),
+            );
 
             netsh::set_static_ipv4(&name, *ip, mask, *gw).await?;
             if snap.dns.is_empty() {
@@ -130,13 +146,15 @@ impl SwitchStrategy for AdapterReconfigStrategy {
             _ => vec![bypass_ip],
         };
 
-        // 255.255.255.0 为常见掩码；若原配置有更精确信息可扩展。MVP 用 /24。
-        let mask = Ipv4Addr::new(255, 255, 255, 0);
+        // 掩码：优先用户配置，未配置按 /24。
+        let mask = target
+            .subnet_mask
+            .unwrap_or_else(|| mask_from_prefix(DEFAULT_MASK_PREFIX));
 
         netsh::set_static_ipv4(&iface, ip, mask, bypass_ip).await?;
         netsh::set_dns(&iface, &dns).await?;
 
-        info!("adapter reconfig enabled: {iface} gw={bypass_ip} dns={dns:?}");
+        info!("adapter reconfig enabled: {iface} ip={ip} mask={mask} gw={bypass_ip} dns={dns:?}");
 
         Ok(SwitchHandle {
             mode: SwitchMode::AdapterReconfig,

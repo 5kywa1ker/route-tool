@@ -12,6 +12,8 @@ use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR, SOCKADDR_IN};
 
 use ipc_protocol::{AdapterInfo, RouteState};
 
+use crate::icmp::ipv4_from_net_order;
+
 const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
 
 /// 枚举所有 IPv4 网卡（含连接状态、IP、网关、DNS）。
@@ -74,6 +76,7 @@ pub fn list_adapters() -> windows::core::Result<Vec<AdapterInfo>> {
             };
 
             let mut ipv4 = Vec::new();
+            let mut ipv4_prefixes = Vec::new();
             let mut dns = Vec::new();
             let mut gateway = Vec::new();
 
@@ -82,6 +85,8 @@ pub fn list_adapters() -> windows::core::Result<Vec<AdapterInfo>> {
                 let u = unsafe { &*ua };
                 if let Some(ip) = sockaddr_to_ipv4(u.Address.lpSockaddr) {
                     ipv4.push(ip);
+                    // 系统报告的在线前缀长度（快照备份/恢复用）。
+                    ipv4_prefixes.push(u.OnLinkPrefixLength);
                 }
                 ua = u.Next;
             }
@@ -110,6 +115,7 @@ pub fn list_adapters() -> windows::core::Result<Vec<AdapterInfo>> {
                 kind: format!("if_type={}", aa.IfType),
                 mac: if mac.is_empty() { None } else { Some(mac) },
                 ipv4: ipv4.into_iter().map(IpAddr::V4).collect(),
+                ipv4_prefixes,
                 gateway: gateway.into_iter().map(IpAddr::V4).collect(),
                 dns: dns.into_iter().map(IpAddr::V4).collect(),
                 is_connected: aa.OperStatus == IfOperStatusUp,
@@ -150,7 +156,7 @@ pub fn current_route_state(adapter_id: &str) -> windows::core::Result<RouteState
         }
 
         let raw = unsafe { row.NextHop.Ipv4.sin_addr.S_un.S_addr };
-        let octets = raw.to_be_bytes();
+        let octets = raw.to_le_bytes();
         if octets == [0, 0, 0, 0] {
             continue; // on-link
         }
@@ -201,7 +207,8 @@ fn sockaddr_to_ipv4(sa: *const SOCKADDR) -> Option<Ipv4Addr> {
     }
     let sin = unsafe { &*(sa as *const SOCKADDR_IN) };
     let raw = unsafe { sin.sin_addr.S_un.S_addr };
-    Some(Ipv4Addr::from(raw.to_be_bytes()))
+    // S_addr 按网络字节序存放，小端机器上用 to_le_bytes 还原八位组。
+    Some(ipv4_from_net_order(raw))
 }
 
 fn pwstr_to_string(p: windows::core::PWSTR) -> String {

@@ -21,7 +21,7 @@ use core_lib::switch_engine::{ReconcileAction, SwitchStrategy};
 use core_lib::{BypassTarget, CoreError, HandleRoute, Result, SwitchHandle, SwitchMode};
 
 use crate::adapters;
-use crate::icmp::in_addr_from;
+use crate::icmp::{in_addr_from, ipv4_from_net_order};
 
 /// 主条目前缀（0.0.0.0/1，覆盖 0.0.0.0 ~ 127.255.255.255）。
 pub const MAIN_PREFIX: &str = "0.0.0.0/1";
@@ -95,8 +95,8 @@ impl RouteOverlayStrategy {
         let rc2 = unsafe { CreateIpForwardEntry2(&row) };
         if rc2 != NO_ERROR {
             return Err(CoreError::Network(format!(
-                "CreateIpForwardEntry2 失败: 0x{:x}",
-                rc2.0
+                "CreateIpForwardEntry2 失败: 0x{:x}（Windows 错误码 {}）",
+                rc2.0, rc2.0
             )));
         }
         Ok(())
@@ -161,21 +161,25 @@ impl RouteOverlayStrategy {
     }
 
     /// 清理经 bypass_ip 的叠加路由（/0 与 /1，netmgmt 协议）。
-    /// 供 reconcile 在"预期直连"时清除脏路由（崩溃/禁用失败可能遗留）。
+    /// 供 reconcile 在"预期直连"时清除脏路由（崩溃/禁用失败可能遗留），
+    /// 也供 enable 失败时回收已添加的部分路由。
+    ///
+    /// 兼容历史脏数据：0.1.7 及之前版本因字节序 bug 写入的下一跳是反转的
+    /// （如 105.123.168.192），这里对两种字节序解读都做匹配，并按路由表中
+    /// 的原始字段原样删除。
     pub async fn cleanup_routes_via(&self, bypass_ip: Ipv4Addr) -> Result<usize> {
-        let rows = scan_overlay_rows(bypass_ip)
-            .map_err(|e| CoreError::Network(format!("读取路由表失败: {e}")))?;
         let mut removed = 0;
-        for r in &rows {
-            match Self::delete_row(
-                r.if_luid,
-                Some(r.if_index),
-                r.prefix,
-                r.prefix_len,
-                bypass_ip,
-            ) {
-                Ok(()) => removed += 1,
-                Err(e) => warn!("清理残留路由 {}/{} 失败: {e}", r.prefix, r.prefix_len),
+        let rows = unsafe { scan_overlay_rows_raw(bypass_ip) };
+        for row in rows {
+            let rc = unsafe { DeleteIpForwardEntry2(&row) };
+            if rc == NO_ERROR {
+                removed += 1;
+            } else {
+                let p = ipv4_from_net_order(unsafe {
+                    row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr
+                });
+                let len = row.DestinationPrefix.PrefixLength;
+                warn!("清理残留路由 {p}/{len} 失败: 0x{:x}", rc.0);
             }
         }
         Ok(removed)
@@ -229,41 +233,55 @@ struct OverlayRow {
     prefix_len: u8,
 }
 
-/// 扫描路由表：返回所有 next_hop == bypass_ip、前缀 /0 或 /1、协议 netmgmt 的路由。
+/// 扫描路由表：返回所有 next_hop == bypass_ip（含历史反转字节序）、
+/// 前缀 /0 或 /1、协议 netmgmt 的路由。
 fn scan_overlay_rows(bypass_ip: Ipv4Addr) -> windows::core::Result<Vec<OverlayRow>> {
-    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+    let mut out = Vec::new();
     unsafe {
-        if GetIpForwardTable2(AF_INET, &mut table) != NO_ERROR {
-            return Ok(vec![]);
+        for row in scan_overlay_rows_raw(bypass_ip) {
+            out.push(OverlayRow {
+                if_index: row.InterfaceIndex,
+                if_luid: row.InterfaceLuid.Value,
+                prefix: ipv4_from_net_order(row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr),
+                prefix_len: row.DestinationPrefix.PrefixLength,
+            });
         }
+    }
+    Ok(out)
+}
+
+/// 扫描路由表（原始行）：返回所有下一跳按两种字节序解读均匹配 bypass_ip、
+/// 前缀 /0 或 /1、协议 netmgmt 的 MIB 行。返回的行可直接用于
+/// DeleteIpForwardEntry2（字段与表内条目一致，避免重建行不匹配）。
+/// 表读取失败时返回空（与旧实现一致，由调用方决定是否告警）。
+unsafe fn scan_overlay_rows_raw(bypass_ip: Ipv4Addr) -> Vec<MIB_IPFORWARD_ROW2> {
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+    if GetIpForwardTable2(AF_INET, &mut table) != NO_ERROR {
+        return vec![];
     }
 
     let mut out = Vec::new();
-    let n = unsafe { (*table).NumEntries };
-    let rows = unsafe { core::slice::from_raw_parts((*table).Table.as_ptr(), n as usize) };
+    let n = (*table).NumEntries;
+    let rows = core::slice::from_raw_parts((*table).Table.as_ptr(), n as usize);
     for row in rows {
         let prefix_len = row.DestinationPrefix.PrefixLength;
         if prefix_len > 1 {
             continue;
         }
-        let prefix_raw = unsafe { row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr };
-        let prefix = Ipv4Addr::from(prefix_raw.to_be_bytes());
-        let raw = unsafe { row.NextHop.Ipv4.sin_addr.S_un.S_addr };
-        if Ipv4Addr::from(raw.to_be_bytes()) != bypass_ip {
+        let raw = row.NextHop.Ipv4.sin_addr.S_un.S_addr;
+        // 正确读法 + 历史版本字节序反转读法，二者任一匹配即视为本工具的路由。
+        let le = ipv4_from_net_order(raw);
+        let swapped = ipv4_from_net_order(raw.swap_bytes());
+        if le != bypass_ip && swapped != bypass_ip {
             continue;
         }
         if row.Protocol != NL_ROUTE_PROTOCOL(ROUTE_PROTOCOL_NETMGMT) {
             continue;
         }
-        out.push(OverlayRow {
-            if_index: row.InterfaceIndex,
-            if_luid: unsafe { row.InterfaceLuid.Value },
-            prefix,
-            prefix_len,
-        });
+        out.push(*row);
     }
-    unsafe { FreeMibTable(table as *const _) };
-    Ok(out)
+    FreeMibTable(table as *const _);
+    out
 }
 
 #[async_trait]
@@ -277,10 +295,25 @@ impl SwitchStrategy for RouteOverlayStrategy {
         let (if_index, if_luid) = self.resolve_interface_for(bypass_ip)?;
         let extra_dest = Ipv4Addr::new(128, 0, 0, 0);
 
-        self.add_route(if_index, if_luid, Ipv4Addr::UNSPECIFIED, 1, bypass_ip)
-            .await?;
-        self.add_route(if_index, if_luid, extra_dest, 1, bypass_ip)
-            .await?;
+        // 先清掉残留（异常退出遗留 / 旧版本字节序脏数据），避免
+        // CreateIpForwardEntry2 撞上 ERROR_OBJECT_ALREADY_EXISTS。
+        self.cleanup_routes_via(bypass_ip).await?;
+
+        if let Err(e) = self
+            .add_route(if_index, if_luid, Ipv4Addr::UNSPECIFIED, 1, bypass_ip)
+            .await
+        {
+            self.cleanup_routes_via(bypass_ip).await?;
+            return Err(e);
+        }
+        if let Err(e) = self
+            .add_route(if_index, if_luid, extra_dest, 1, bypass_ip)
+            .await
+        {
+            // 部分成功不算成功：回收已添加的路由，不留黑洞脏数据。
+            self.cleanup_routes_via(bypass_ip).await?;
+            return Err(e);
+        }
 
         info!(
             "route overlay enabled: {MAIN_PREFIX} + {EXTRA_PREFIX} via {bypass_ip} on if_index={if_index}"

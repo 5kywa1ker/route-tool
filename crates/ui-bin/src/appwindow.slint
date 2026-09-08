@@ -20,6 +20,8 @@ export component AppWindow inherits Window {
     in-out property <int> adapter-index: -1;
     in-out property <string> bypass-ip-text: "";
     in-out property <int> mode-index: 0;         // 0=路由叠加 1=网卡直改
+    in-out property <string> dns-text: "";
+    in-out property <string> mask-text: "";
     in-out property <int> interval-secs: 5;
     in-out property <int> failure-threshold: 3;
     in-out property <bool> auto-reenable: false;
@@ -95,6 +97,27 @@ export component AppWindow inherits Window {
                             current-index <=> root.mode-index;
                         }
                     }
+                }
+                // 网卡直改模式独有配置：子网掩码 + DNS（路由叠加模式下隐藏）。
+                if root.mode-index == 1: GridBox {
+                    spacing: 6px;
+                    Row {
+                        Text { text: "子网掩码:"; vertical-alignment: center; }
+                        LineEdit {
+                            text <=> root.mask-text;
+                            placeholder-text: "255.255.255.0";
+                        }
+                    }
+                    Row {
+                        Text { text: "DNS:"; vertical-alignment: center; }
+                        LineEdit {
+                            text <=> root.dns-text;
+                            placeholder-text: "留空则使用旁路由 IP";
+                        }
+                    }
+                }
+                GridBox {
+                    spacing: 6px;
                     Row {
                         Text { text: "检测间隔(秒):"; vertical-alignment: center; }
                         SpinBox {
@@ -145,7 +168,7 @@ export component AppWindow inherits Window {
         }
 
         Text {
-            text: "说明：路由叠加 = 添加 0.0.0.0/1 + 128.0.0.0/1 两条路由覆盖默认路由，不动网卡配置；\n网卡直改 = 直接修改网卡的网关/DNS，需备份恢复，风险略高。";
+            text: "说明：路由叠加 = 添加 0.0.0.0/1 + 128.0.0.0/1 两条路由覆盖默认路由，不动网卡配置；\n网卡直改 = 直接修改网卡的网关/DNS/子网掩码，需备份恢复，风险略高。";
             font-size: 10px;
             color: #888;
             wrap: word-wrap;

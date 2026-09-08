@@ -87,6 +87,13 @@ impl Controller {
                 "失败阈值需在 1~100 之间".into(),
             ));
         }
+        if let Some(mask) = cfg.subnet_mask {
+            if !ipc_protocol::is_valid_subnet_mask(mask) {
+                return Err(CoreError::ConfigIncomplete(
+                    "子网掩码无效（需为连续前缀，如 255.255.255.0）".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -107,7 +114,8 @@ impl Controller {
         let target_changed = old.adapter_id != cfg.adapter_id
             || old.bypass_ip != cfg.bypass_ip
             || old.switch_mode != cfg.switch_mode
-            || old.dns_override != cfg.dns_override;
+            || old.dns_override != cfg.dns_override
+            || old.subnet_mask != cfg.subnet_mask;
         if target_changed {
             info!("config target changed while enabled; re-applying bypass");
             // enable() 内部先按旧句柄 disable（恢复/删路由），再按新配置启用。
@@ -298,11 +306,18 @@ impl Controller {
             .await
             .unwrap_or(false);
 
+        // 前缀长度优先取系统真实值，缺项时按 /24 兜底。
+        let prefixes: Vec<u8> = if a.ipv4_prefixes.len() == a.ipv4.len() {
+            a.ipv4_prefixes.clone()
+        } else {
+            vec![24; a.ipv4.len()]
+        };
+
         Ok(AdapterSnapshot {
             adapter_id: adapter_id.to_string(),
             is_dhcp_enabled: is_dhcp,
             static_ipv4: a.ipv4.clone(),
-            static_ipv4_mask: vec![24; a.ipv4.len()],
+            static_ipv4_mask: prefixes,
             gateway: a.gateway.clone(),
             dns: a.dns.clone(),
         })
@@ -352,6 +367,7 @@ fn bypass_target(cfg: &AppConfig) -> BypassTarget {
         adapter_id: cfg.adapter_id.clone(),
         bypass_ip: cfg.bypass_ip,
         dns: cfg.dns_override.clone(),
+        subnet_mask: cfg.subnet_mask,
     }
 }
 

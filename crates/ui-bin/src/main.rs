@@ -20,6 +20,27 @@ use ipc_protocol::{AppConfig, HealthStatus, SwitchMode};
 
 slint::include_modules!();
 
+/// 直改模式子网掩码的默认值（用户未填时）。
+const DEFAULT_MASK: &str = "255.255.255.0";
+
+/// 解析 DNS 输入（逗号/分号/空白分隔），空输入返回 None。
+fn parse_dns_list(text: &str) -> Result<Option<Vec<std::net::IpAddr>>, String> {
+    let items: Vec<&str> = text
+        .split([',', ';', '，', '；', ' ', '\t'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    for it in items {
+        let ip: std::net::IpAddr = it.parse().map_err(|_| format!("DNS 地址无效: {it}"))?;
+        out.push(ip);
+    }
+    Ok(Some(out))
+}
+
 /// UI 全局状态（连接共享）。
 struct UiState {
     client: Option<ipc_client::IpcClient>,
@@ -62,6 +83,38 @@ async fn refresh_adapters(state: Arc<Mutex<UiState>>, app_weak: slint::Weak<AppW
             app.set_adapter_index(idx);
         }
     });
+}
+
+/// 把配置同步到 UI 控件（首次连接与重连共用）。
+fn apply_config_to_ui(app: &AppWindow, cfg: &AppConfig) {
+    app.set_bypass_ip_text(cfg.bypass_ip.to_string().into());
+    app.set_mode_index(match cfg.switch_mode {
+        SwitchMode::RouteOverlay => 0,
+        SwitchMode::AdapterReconfig => 1,
+    });
+    app.set_interval_secs(cfg.health_check_interval_secs as i32);
+    app.set_failure_threshold(cfg.failure_threshold as i32);
+    app.set_auto_reenable(cfg.auto_reenable_after_recovery);
+    app.set_notifications(cfg.notifications_enabled);
+    app.set_has_config(true);
+    app.set_mask_text(
+        cfg.subnet_mask
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| DEFAULT_MASK.to_string())
+            .into(),
+    );
+    let dns_text = cfg
+        .dns_override
+        .as_ref()
+        .map(|list| {
+            list.iter()
+                .filter(|ip| matches!(ip, std::net::IpAddr::V4(_)))
+                .map(|ip| ip.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    app.set_dns_text(dns_text.into());
 }
 
 fn init_logging() {
@@ -173,17 +226,8 @@ fn main() -> anyhow::Result<()> {
 
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(app) = app_weak.upgrade() {
-                    if let Some(cfg) = cfg {
-                        app.set_bypass_ip_text(cfg.bypass_ip.to_string().into());
-                        app.set_mode_index(match cfg.switch_mode {
-                            SwitchMode::RouteOverlay => 0,
-                            SwitchMode::AdapterReconfig => 1,
-                        });
-                        app.set_interval_secs(cfg.health_check_interval_secs as i32);
-                        app.set_failure_threshold(cfg.failure_threshold as i32);
-                        app.set_auto_reenable(cfg.auto_reenable_after_recovery);
-                        app.set_notifications(cfg.notifications_enabled);
-                        app.set_has_config(true);
+                    if let Some(cfg) = &cfg {
+                        apply_config_to_ui(&app, cfg);
                     }
                     if let Some(names) = adapter_names {
                         app.set_adapter_names(ModelRc::from(Rc::new(VecModel::from(names))));
@@ -326,6 +370,26 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
             };
+            // 直改模式专有项：子网掩码 + DNS（保存时一并校验，路由叠加模式下值保留）。
+            let mask_text = app.get_mask_text().trim().to_string();
+            let mask = if mask_text.is_empty() {
+                Some(DEFAULT_MASK.parse().unwrap())
+            } else {
+                match mask_text.parse() {
+                    Ok(m) => Some(m),
+                    Err(_) => {
+                        app.set_config_error("子网掩码无效（如 255.255.255.0）".into());
+                        return;
+                    }
+                }
+            };
+            let dns = match parse_dns_list(&app.get_dns_text()) {
+                Ok(d) => d,
+                Err(e) => {
+                    app.set_config_error(e.into());
+                    return;
+                }
+            };
             let mut cfg = AppConfig {
                 bypass_ip: ip,
                 switch_mode: if app.get_mode_index() == 1 {
@@ -335,6 +399,8 @@ fn main() -> anyhow::Result<()> {
                 },
                 ..AppConfig::default()
             };
+            cfg.subnet_mask = mask;
+            cfg.dns_override = dns;
             cfg.health_check_interval_secs = app.get_interval_secs().max(1) as u32;
             cfg.failure_threshold = app.get_failure_threshold().max(1) as u32;
             cfg.auto_reenable_after_recovery = app.get_auto_reenable();
@@ -346,7 +412,6 @@ fn main() -> anyhow::Result<()> {
                 let mut st = state.lock().await;
                 // UI 不直接编辑 adapter_id，保留原值。
                 cfg.adapter_id = st.config.adapter_id.clone();
-                cfg.dns_override = st.config.dns_override.clone();
                 let result = match st.client.as_mut() {
                     Some(c) => c.update_config(&cfg).await,
                     None => Err("未连接到核心服务".to_string()),
@@ -452,16 +517,7 @@ fn main() -> anyhow::Result<()> {
                             let app_weak = app_weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(app) = app_weak.upgrade() {
-                                    app.set_bypass_ip_text(cfg.bypass_ip.to_string().into());
-                                    app.set_mode_index(match cfg.switch_mode {
-                                        SwitchMode::RouteOverlay => 0,
-                                        SwitchMode::AdapterReconfig => 1,
-                                    });
-                                    app.set_interval_secs(cfg.health_check_interval_secs as i32);
-                                    app.set_failure_threshold(cfg.failure_threshold as i32);
-                                    app.set_auto_reenable(cfg.auto_reenable_after_recovery);
-                                    app.set_notifications(cfg.notifications_enabled);
-                                    app.set_has_config(true);
+                                    apply_config_to_ui(&app, &cfg);
                                     app.set_adapter_names(ModelRc::from(Rc::new(VecModel::from(
                                         names,
                                     ))));

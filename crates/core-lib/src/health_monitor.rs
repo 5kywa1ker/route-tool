@@ -443,6 +443,7 @@ mod tests {
                 adapter_id: "guid".into(),
                 bypass_ip: "10.0.0.1".parse().unwrap(),
                 dns: None,
+                subnet_mask: None,
             },
             interval: Duration::from_secs(3600), // 手动 tick，不受定时影响
             threshold,

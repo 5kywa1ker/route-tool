@@ -29,6 +29,9 @@ pub struct BypassTarget {
     pub adapter_id: String,
     pub bypass_ip: IpAddr,
     pub dns: Option<Vec<IpAddr>>,
+    /// 网卡直改模式使用的子网掩码；None 时策略层按 255.255.255.0 处理。
+    #[serde(default)]
+    pub subnet_mask: Option<std::net::Ipv4Addr>,
 }
 
 /// 网卡信息。
@@ -41,6 +44,9 @@ pub struct AdapterInfo {
     pub kind: String,
     pub mac: Option<String>,
     pub ipv4: Vec<IpAddr>,
+    /// 与 ipv4 一一对应的前缀长度（快照备份/恢复用）。
+    #[serde(default)]
+    pub ipv4_prefixes: Vec<u8>,
     pub gateway: Vec<IpAddr>,
     pub dns: Vec<IpAddr>,
     pub is_connected: bool,
@@ -131,6 +137,9 @@ pub struct AppConfig {
     pub bypass_ip: IpAddr,
     pub switch_mode: SwitchMode,
     pub dns_override: Option<Vec<IpAddr>>,
+    /// 网卡直改模式的子网掩码；None = 255.255.255.0（路由叠加模式忽略）。
+    #[serde(default)]
+    pub subnet_mask: Option<std::net::Ipv4Addr>,
     pub health_check_interval_secs: u32,
     pub failure_threshold: u32,
     pub auto_reenable_after_recovery: bool,
@@ -145,11 +154,23 @@ impl Default for AppConfig {
             bypass_ip: IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
             switch_mode: SwitchMode::RouteOverlay,
             dns_override: None,
+            subnet_mask: None,
             health_check_interval_secs: 5,
             failure_threshold: 3,
             auto_reenable_after_recovery: false,
             notifications_enabled: true,
         }
+    }
+}
+
+/// 校验子网掩码合法性（必须为连续 1 前缀，如 255.255.255.0）。
+pub fn is_valid_subnet_mask(mask: std::net::Ipv4Addr) -> bool {
+    let bits = u32::from(mask);
+    let leading = bits.leading_ones();
+    bits == if leading == 0 {
+        0
+    } else {
+        u32::MAX << (32 - leading)
     }
 }
 
