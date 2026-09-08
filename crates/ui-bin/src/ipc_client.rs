@@ -3,10 +3,7 @@
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::ClientOptions;
 
-use ipc_protocol::{
-    method, AppConfig, RpcOutcome, RpcRequest, RpcResponse,
-    PIPE_NAME,
-};
+use ipc_protocol::{method, AppConfig, RpcOutcome, RpcRequest, RpcResponse, PIPE_NAME};
 
 /// UI 到 Core 的客户端。
 pub struct IpcClient {
@@ -27,7 +24,11 @@ impl IpcClient {
         })
     }
 
-    async fn send_request(&mut self, m: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    async fn send_request(
+        &mut self,
+        m: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         let req = RpcRequest {
             jsonrpc: "2.0".into(),
             id: self.next_id,
@@ -65,12 +66,16 @@ impl IpcClient {
     }
 
     pub async fn get_status(&mut self) -> Result<ipc_protocol::RuntimeState, String> {
-        let v = self.send_request(method::GET_STATUS, serde_json::json!(null)).await?;
+        let v = self
+            .send_request(method::GET_STATUS, serde_json::json!(null))
+            .await?;
         serde_json::from_value(v).map_err(|e| e.to_string())
     }
 
     pub async fn get_config(&mut self) -> Result<AppConfig, String> {
-        let v = self.send_request(method::GET_CONFIG, serde_json::json!(null)).await?;
+        let v = self
+            .send_request(method::GET_CONFIG, serde_json::json!(null))
+            .await?;
         serde_json::from_value(v).map_err(|e| e.to_string())
     }
 

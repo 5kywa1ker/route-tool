@@ -148,7 +148,7 @@ export component AppWindow inherits Window {
         }
 
         Text {
-            text: "说明：路由叠加 = 仅添加一条高优先级默认路由，不动网卡配置；\n网卡直改 = 直接修改网卡的网关/DNS，需备份恢复，风险略高。";
+            text: "说明：路由叠加 = 添加 0.0.0.0/1 + 128.0.0.0/1 两条路由覆盖默认路由，不动网卡配置；\n网卡直改 = 直接修改网卡的网关/DNS，需备份恢复，风险略高。";
             font-size: 11px;
             color: #888;
             wrap: word-wrap;

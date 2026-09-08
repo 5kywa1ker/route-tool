@@ -6,14 +6,15 @@
 use std::net::IpAddr;
 
 pub mod health_monitor;
+pub mod log_prune;
 pub mod net_inspector;
 pub mod state_store;
 pub mod switch_engine;
 
 // 平台无关数据类型，随 ipc-protocol 复用给 UI。
 pub use ipc_protocol::{
-    AdapterInfo, AdapterSnapshot, AppConfig, BypassTarget, HealthEvent, HealthEventType,
-    HealthStatus, RouteState, RuntimeState, SwitchHandle, SwitchMode,
+    AdapterInfo, AdapterSnapshot, AppConfig, BypassTarget, HandleRoute, HealthEvent,
+    HealthEventType, HealthStatus, RouteState, RuntimeState, SwitchHandle, SwitchMode,
 };
 
 /// core 统一错误类型。

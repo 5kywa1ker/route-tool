@@ -29,7 +29,9 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let appender = tracing_appender::rolling::daily(dir, "bypass-core.log");
     let (writer, guard) = tracing_appender::non_blocking(appender);
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_writer(writer)
         .with_ansi(false)
         .init();
@@ -37,13 +39,13 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
 }
 
 /// 核心运行逻辑：初始化状态 + reconcile + IPC server。
-pub async fn run_core(stop_rx: mpsc::Receiver<()>) {
+pub async fn run_core(mut stop_rx: mpsc::Receiver<()>) {
     let store = core_lib::state_store::StateStore::default();
     if let Err(e) = store.ensure_dirs() {
         error!("初始化数据目录失败: {e}");
     }
 
-    let controller = match Controller::new(store) {
+    let controller = match Controller::new(store.clone()) {
         Ok(c) => c,
         Err(e) => {
             error!("初始化控制器失败: {e}");
@@ -52,17 +54,25 @@ pub async fn run_core(stop_rx: mpsc::Receiver<()>) {
     };
     let state = Arc::new(ServerState::new(controller));
 
+    // 日志保留巡检：启动时清一次过期日志，此后每 24 小时一次（§2：保留 7 天）。
+    core_lib::log_prune::spawn_daily_prune(store.base_dir().join("logs"), "bypass-core.log".into());
+
     // 启动一致性校验。
     if let Err(e) = state.controller.reconcile_on_startup().await {
         error!("启动校验失败: {e}");
     }
 
-    let (_shutdown_tx, shutdown_rx) = broadcast::channel(1);
-    let _ = stop_rx; // TODO: 接入优雅停机
+    // 优雅停机：SCM/Ctrl+C 的 stop 信号转发为 shutdown 广播，IPC server 收到后退出。
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+    tokio::spawn(async move {
+        if stop_rx.recv().await.is_some() {
+            info!("收到停机信号，通知 IPC server 退出");
+            let _ = shutdown_tx.send(());
+        }
+    });
     ipc_server::serve(state.clone(), shutdown_rx).await;
 
     info!("core 退出");
-    drop(stop_rx);
 }
 
 #[tokio::main]

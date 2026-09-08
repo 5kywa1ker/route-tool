@@ -4,8 +4,8 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
 use windows::Win32::NetworkManagement::IpHelper::{
-    GetAdaptersAddresses, GetIfEntry2, GetIpForwardTable2, FreeMibTable, MIB_IF_ROW2,
-    IP_ADAPTER_ADDRESSES_LH,
+    FreeMibTable, GetAdaptersAddresses, GetIfEntry2, GetIpForwardTable2, IP_ADAPTER_ADDRESSES_LH,
+    MIB_IF_ROW2,
 };
 use windows::Win32::NetworkManagement::Ndis::{IfOperStatusUp, NET_LUID_LH};
 use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR, SOCKADDR_IN};
@@ -35,7 +35,9 @@ pub fn list_adapters() -> windows::core::Result<Vec<AdapterInfo>> {
             continue;
         }
         if rc != NO_ERROR.0 {
-            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(rc as i32)));
+            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                rc as i32,
+            )));
         }
         break;
     }
@@ -126,7 +128,9 @@ pub fn current_route_state(adapter_id: &str) -> windows::core::Result<RouteState
     unsafe {
         let rc = GetIpForwardTable2(AF_INET, &mut table);
         if rc != NO_ERROR {
-            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(rc.0 as i32)));
+            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                rc.0 as i32,
+            )));
         }
     }
 
@@ -153,9 +157,15 @@ pub fn current_route_state(adapter_id: &str) -> windows::core::Result<RouteState
         default_hops.push(IpAddr::V4(Ipv4Addr::from(octets)));
 
         // 该行所属网卡 GUID 是否等于 adapter_id。
-        let luid = NET_LUID_LH { Value: unsafe { row.InterfaceLuid.Value } };
+        let luid = NET_LUID_LH {
+            Value: unsafe { row.InterfaceLuid.Value },
+        };
         if let Ok(guid) = luid_to_guid(&luid) {
-            if format!("{guid:?}").trim_start_matches('{').trim_end_matches('}').eq_ignore_ascii_case(adapter_id) {
+            if format!("{guid:?}")
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .eq_ignore_ascii_case(adapter_id)
+            {
                 via_target = true;
             }
         }
@@ -209,7 +219,9 @@ fn luid_to_guid(luid: &NET_LUID_LH) -> windows::core::Result<windows::core::GUID
     unsafe {
         let rc = ConvertInterfaceLuidToGuid(luid, &mut guid);
         if rc != NO_ERROR {
-            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(rc.0 as i32)));
+            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                rc.0 as i32,
+            )));
         }
     }
     Ok(guid)

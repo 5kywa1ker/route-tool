@@ -269,33 +269,34 @@ bypass-tool/
 
 ---
 
-## 12. 实现状态（2026-09-07）
+## 12. 实现状态（2026-09-08）
 
 ### 12.1 已完成
 
 | 范围 | 说明 |
 |---|---|
 | workspace 结构 | 5 crates：`ipc-protocol` / `core-lib` / `core-win` / `core-bin` / `ui-bin` |
-| IPC 协议 | 行分隔 JSON-RPC 2.0，管道 `\\.\pipe\BypassToolCore`，支持 GetStatus / GetConfig / UpdateConfig / EnableBypass / DisableBypass / TestConnectivity / ListAdapters / SubscribeEvents（事件推送） |
-| RouteOverlay 策略 | `CreateIpForwardEntry2`/`DeleteIpForwardEntry2` 添加/删除 0.0.0.0/0 via bypass_ip（metric 5），`is_active` 基于路由表+接口状态 |
-| AdapterReconfig 策略 | netsh 静态 IP/网关/DNS 切换；启用前快照备份（`adapter_snapshot.json`），禁用时恢复（DHCP 或原静态参数） |
-| 健康检测 | 定时 ICMP ping bypass_ip，连续失败达阈值 → 自动回退（禁用策略/恢复快照）+ `AutoFallbackTriggered` 事件；可选"恢复后自动重新启用"；健康巡检中自动校验路由仍生效（睡眠唤醒/网卡切换自愈） |
-| 启动一致性校验 | `reconcile_on_startup`：路由叠加模式校验路由表，直改模式校验网关/快照，无快照时安全回退直连 |
-| Windows 服务 | `bypass-core --install-service` / `--uninstall-service`，SCM 管理自启，`--console` 调试模式 |
+| IPC 协议 | 行分隔 JSON-RPC 2.0，管道 `\\.\pipe\BypassToolCore`（DACL 仅 SYSTEM/Administrators/Authenticated Users），支持 GetStatus / GetConfig / UpdateConfig / EnableBypass / DisableBypass / TestConnectivity / ListAdapters / SubscribeEvents（事件推送）；响应携带 `protocol_version` / `supported_modes` 预留协商字段 |
+| RouteOverlay 策略 | `CreateIpForwardEntry2`/`DeleteIpForwardEntry2` 添加/删除 `0.0.0.0/1` + `128.0.0.0/1` 两条叠加路由（最长前缀匹配必然覆盖默认路由，不依赖 metric），`is_active` 校验两条 /1 路由 + 接口状态 |
+| AdapterReconfig 策略 | netsh 静态 IP/网关/DNS 切换；启用前快照备份（`adapter_snapshot.json`），禁用时恢复（DHCP 或原静态参数）——恢复逻辑在策略 `disable` 内完成，手动禁用与健康检测自动回退共用同一路径 |
+| 健康检测 | 定时 ICMP ping bypass_ip，连续失败达阈值 → 自动回退（调策略 disable）+ `AutoFallbackTriggered` 事件；可选"恢复后自动重新启用"；健康巡检中自动校验路由仍生效（睡眠唤醒/网卡切换自愈）；回退/重建等状态变化持久化到 `runtime_state.json`；世代计数器防止 disable 后在途探测复活路由 |
+| 启动一致性校验 | `reconcile_on_startup`：按 `runtime_state.json` 预期状态修正实际状态（叠加模式校验/重建 /1 路由，直改模式校验网关/快照）；预期直连时清理残留叠加路由与孤儿快照；校验后恢复健康检测循环 |
+| UpdateConfig 热生效 | 配置校验（网卡/IP/间隔/阈值）→ 落盘；启用中目标变更（网卡/IP/模式/DNS）自动重放切换，仅健康参数变化则重启监控循环 |
+| Windows 服务 | `bypass-core --install-service` / `--uninstall-service`，SCM 管理自启，`--console` 调试模式；Stop/Shutdown 信号优雅停机（IPC server 退出后上报 Stopped） |
 | 持久化 | `%ProgramData%\BypassTool\{config,runtime_state,adapter_snapshot}.json`，临时文件+fsync+原子 rename，损坏文件按默认值容错 |
-| 日志 | tracing + tracing-appender 按天滚动（`%ProgramData%\BypassTool\logs\`；UI 日志在 `%TEMP%\BypassTool\`） |
-| UI | 托盘（灰/绿/红三态图标 + 右键菜单 + 悬浮提示）、Slint 设置窗口、Toast 通知（回退时）、1s 状态轮询 |
+| 日志 | tracing + tracing-appender 按天滚动（`%ProgramData%\BypassTool\logs\`；UI 日志在 `%TEMP%\BypassTool\`）；7 天保留期，core 启动时清理 + 每 24h 巡检，UI 启动时清理 |
+| UI | 托盘（灰/绿/红三态图标 + 右键菜单 + 悬浮提示）、Slint 设置窗口、Toast 通知（回退时）、1s 状态轮询 + 断线自动重连（含配置/网卡列表重新同步）；网卡下拉框选择即落盘；关窗口隐藏到托盘不退出，托盘"打开设置"可唤出 |
 | 安装包 | `installer/BypassTool.iss`（Inno Setup，含服务注册/启动/开机自启 UI 可选项） |
-| CI/CD | `.github/workflows/release.yml`：push tag `v*` → 构建 → 测试 → iscc 打包 → GitHub Release |
-| 测试 | `cargo test --workspace`：协议序列化往返、状态存储原子写/容错、健康检测状态机（降级/回退/自动重启用/Idle）19 项单测 |
+| CI/CD | `.github/workflows/release.yml`：push tag `v*` → 构建（`--target x86_64-pc-windows-msvc`，与安装包路径一致）→ 测试 → iscc 打包 → GitHub Release |
+| 测试 | `cargo test --workspace`：协议序列化往返/能力字段、状态存储原子写/容错、健康检测状态机（降级/回退/自动重启用/Idle/过期世代）、日志保留清理等单测 |
 | 代码质量 | `cargo clippy --workspace --all-targets` 零警告 |
 
 ### 12.2 已知限制（与 §11 对应）
 
-- **仅支持 IPv4**：路由叠加只处理 `0.0.0.0/0`（AF_INET），网卡直改只设置 IPv4 静态地址与 IPv4 DNS；IPv6 路由与 DNS（含 RA/DHCPv6）不受管理。启用旁路由后 IPv6 流量仍按系统原路由行走，不会经旁路由。
+- **仅支持 IPv4**：路由叠加只处理 `0.0.0.0/1` + `128.0.0.0/1`（AF_INET），网卡直改只设置 IPv4 静态地址与 IPv4 DNS；IPv6 路由与 DNS（含 RA/DHCPv6）不受管理。启用旁路由后 IPv6 流量仍按系统原路由行走，不会经旁路由。
 - **AdapterReconfig 模式使用 netsh**：需求文档 §2 建议的 `CreateUnicastIpAddressEntry`/`SetInterfaceDnsSettings` 纯 API 方案，因 DHCP 开关与静态网关设置需额外操作 WMI/注册表，MVP 采用系统自带 netsh（SYSTEM 权限可用）；后续可替换 `core-win/src/netsh.rs`。
 - 子网掩码快照恢复固定按 /24 处理（`adapter_snapshot.json` 中 `static_ipv4_mask` 预留了扩展位）。
-- 首次配置向导目前为单窗口简化实现（网卡列表懒加载、DNS 自定义输入待补）。
+- 首次配置向导目前为单窗口简化实现（网卡下拉框已接入 ListAdapters；DNS 自定义输入待补）。
 - "恢复出厂网络设置"兜底小工具（Phase 3 验收项）尚未单独提供。
 
 ### 12.3 本地构建与运行

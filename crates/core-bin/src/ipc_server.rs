@@ -5,14 +5,15 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions};
+use tokio::net::windows::named_pipe::{
+    ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 use ipc_protocol::{
-    method, AppConfig, HealthEvent, RpcError, RpcNotification, RpcOutcome,
-    RpcRequest, RpcResponse, APP_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND,
-    PIPE_NAME,
+    method, AppConfig, HealthEvent, RpcError, RpcNotification, RpcOutcome, RpcRequest, RpcResponse,
+    APP_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, PIPE_NAME,
 };
 
 use crate::state::ServerState;
@@ -27,7 +28,10 @@ pub async fn serve(state: Arc<ServerState>, mut shutdown: broadcast::Receiver<()
             .first_pipe_instance(false)
             .create(PIPE_NAME)
         {
-            Ok(s) => s,
+            Ok(s) => {
+                harden_pipe_acl(&s);
+                s
+            }
             Err(e) => {
                 error!("创建 pipe 实例失败: {e}");
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -65,7 +69,6 @@ where
 {
     let mut reader = BufReader::new(read);
     let mut line = String::new();
-    let mut subscribed = false;
     let mut event_rx: Option<broadcast::Receiver<HealthEvent>> = None;
 
     loop {
@@ -122,7 +125,6 @@ where
         if req.method == method::SUBSCRIBE_EVENTS {
             if event_rx.is_none() {
                 event_rx = Some(state.controller.event_tx.subscribe());
-                subscribed = true;
             }
             let resp = RpcResponse {
                 jsonrpc: "2.0".into(),
@@ -130,8 +132,8 @@ where
                 result: RpcOutcome::Ok {
                     result: serde_json::json!({ "subscribed": true }),
                 },
+                ..Default::default()
             };
-            let _ = subscribed;
             write_line(&mut write, &resp).await;
             continue;
         }
@@ -141,6 +143,7 @@ where
             jsonrpc: "2.0".into(),
             id: req.id,
             result: outcome,
+            ..Default::default()
         };
         write_line(&mut write, &resp).await;
     }
@@ -149,9 +152,7 @@ where
 async fn write_line<W: AsyncWrite + Unpin, T: serde::Serialize>(w: &mut W, v: &T) {
     match serde_json::to_string(v) {
         Ok(text) => {
-            if w.write_all(text.as_bytes()).await.is_err()
-                || w.write_all(b"\n").await.is_err()
-            {
+            if w.write_all(text.as_bytes()).await.is_err() || w.write_all(b"\n").await.is_err() {
                 debug!("客户端断开");
             }
             let _ = w.flush().await;
@@ -177,11 +178,10 @@ async fn dispatch(state: &ServerState, req: &RpcRequest) -> RpcOutcome {
                 Ok(v) => v,
                 Err(e) => return err(INVALID_PARAMS, &format!("参数不合法: {e}")),
             };
-            if let Err(e) = c.store.save_config(&cfg) {
-                return err(APP_ERROR, &format!("保存配置失败: {e}"));
+            match c.update_config(cfg).await {
+                Ok(()) => ok(&serde_json::json!(null)),
+                Err(e) => err(e.app_error_code(), &e.to_string()),
             }
-            *c.config.write().await = cfg;
-            ok(&serde_json::json!(null))
         }
         method::ENABLE_BYPASS => match c.enable().await {
             Ok(()) => ok(&serde_json::json!(null)),
@@ -238,4 +238,68 @@ fn err(code: i32, message: &str) -> RpcOutcome {
 #[allow(dead_code)]
 pub async fn connect_client() -> std::io::Result<NamedPipeClient> {
     ClientOptions::new().open(PIPE_NAME)
+}
+
+/// 收紧管道 DACL：仅 SYSTEM / Administrators / Authenticated Users 可访问。
+///
+/// tokio 的 ServerOptions 不支持直接设置安全属性，这里在创建后用
+/// SetKernelObjectSecurity 改写 DACL（SDDL 转换）。失败仅告警不拒绝服务
+/// （默认 DACL 下管道本就只授予创建者与本地访问）。
+fn harden_pipe_acl(server: &NamedPipeServer) {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows::Win32::Foundation::{LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows::Win32::Security::{
+        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    };
+
+    const SDDL_REVISION_1: u32 = 1;
+    // D: DACL, P: 无继承, A: 允许; GA: GENERIC_ALL
+    // SY=SYSTEM, BA=Administrators, AU=Authenticated Users
+    const SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)";
+
+    unsafe {
+        // UTF-16 编码 SDDL 字符串（PCWSTR 要求宽字符）。
+        let sddl_w: Vec<u16> = SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+
+        let mut sd_len = 0u32;
+        let mut sd = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+        if let Err(e) = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            windows::core::PCWSTR(sddl_w.as_ptr()),
+            SDDL_REVISION_1,
+            &mut sd,
+            Some(&mut sd_len),
+        ) {
+            warn!("转换管道 SDDL 失败，跳过 ACL 加固: {e}");
+            return;
+        }
+
+        // 从 SD 中取 DACL（确认 SDDL 转换产物确实包含 DACL）。
+        let mut has_dacl = false.into();
+        let mut dacl_ptr: *mut windows::Win32::Security::ACL = std::ptr::null_mut();
+        if let Err(e) =
+            GetSecurityDescriptorDacl(sd, &mut has_dacl, &mut dacl_ptr, &mut false.into())
+        {
+            warn!("读取 SD 的 DACL 失败，跳过 ACL 加固: {e}");
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+            return;
+        }
+        if !has_dacl.as_bool() || dacl_ptr.is_null() {
+            warn!("SDDL 转换产物无 DACL，跳过 ACL 加固");
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+            return;
+        }
+
+        // 把新 DACL 应用到管道内核对象：传入整个 SD，仅施加 DACL_SECURITY_INFORMATION。
+        let hd = HANDLE(server.as_raw_handle());
+        let set =
+            windows::Win32::Security::SetKernelObjectSecurity(hd, DACL_SECURITY_INFORMATION, sd);
+        if let Err(e) = set {
+            warn!("设置管道 DACL 失败: {e}");
+        } else {
+            debug!("pipe DACL hardened (SYSTEM/Administrators/AuthUsers)");
+        }
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+    }
 }

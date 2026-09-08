@@ -124,8 +124,9 @@ fn atomic_write_text(base_dir: &Path, file: &str, text: &str) -> Result<()> {
         .map_err(|e| CoreError::Persistence(format!("fsync 失败: {e}")))?;
     drop(f);
 
-    fs::rename(&tmp_path, &final_path)
-        .map_err(|e| CoreError::Persistence(format!("rename 到 {} 失败: {e}", final_path.display())))?;
+    fs::rename(&tmp_path, &final_path).map_err(|e| {
+        CoreError::Persistence(format!("rename 到 {} 失败: {e}", final_path.display()))
+    })?;
 
     // 对目录再 fsync 以保证 rename 持久（Windows 上目录 fsync 支持有限，尽力而为）。
     let _ = fs::File::open(dir).and_then(|d| d.sync_all());
@@ -138,7 +139,8 @@ mod tests {
     use crate::{HealthStatus, SwitchMode};
 
     fn temp_store(tag: &str) -> StateStore {
-        let dir = std::env::temp_dir().join(format!("BypassToolTest_{tag}_{:?}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("BypassToolTest_{tag}_{:?}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         StateStore::new(dir)
     }
@@ -232,7 +234,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         assert!(entries.contains(&RUNTIME_FILE.to_string()));
-        assert!(!entries.iter().any(|n| n.contains(".tmp")), "leftover tmp: {entries:?}");
+        assert!(
+            !entries.iter().any(|n| n.contains(".tmp")),
+            "leftover tmp: {entries:?}"
+        );
         cleanup(&store);
     }
 }

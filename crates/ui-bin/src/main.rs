@@ -4,10 +4,11 @@ mod ipc_client;
 mod notify;
 mod tray;
 
+use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use slint::ComponentHandle;
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use tao::event_loop::EventLoopBuilder;
 use tao::window::Window;
 use tracing_subscriber::EnvFilter;
@@ -20,15 +21,49 @@ slint::include_modules!();
 struct UiState {
     client: Option<ipc_client::IpcClient>,
     config: AppConfig,
+    /// 上次 list_adapters 结果（下拉框数据源 + id 映射）。
+    adapters: Vec<ipc_protocol::AdapterInfo>,
+}
+
+/// 拉取网卡列表并填充下拉框；同时按配置里的 adapter_id 选中对应项。
+async fn refresh_adapters(state: Arc<Mutex<UiState>>, app_weak: slint::Weak<AppWindow>) {
+    let (cfg_id, result) = {
+        let mut st = state.lock().await;
+        let Some(c) = st.client.as_mut() else {
+            return;
+        };
+        let r = c.list_adapters().await;
+        (st.config.adapter_id.clone(), r)
+    };
+    let Ok(list) = result else { return };
+
+    let sel = list.iter().position(|a| a.id == cfg_id);
+    let names: Vec<SharedString> = list.iter().map(|a| a.name.clone().into()).collect();
+    let idx = sel.map(|i| i as i32).unwrap_or(-1);
+
+    {
+        let mut st = state.lock().await;
+        st.adapters = list;
+    }
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(app) = app_weak.upgrade() {
+            app.set_adapter_names(ModelRc::from(Rc::new(VecModel::from(names))));
+            app.set_adapter_index(idx);
+        }
+    });
 }
 
 fn init_logging() {
     let dir = std::env::temp_dir().join("BypassTool");
     let _ = std::fs::create_dir_all(&dir);
+    // 日志保留巡检（§2：保留 7 天），UI 与 core 各自清理自己的前缀。
+    core_lib::log_prune::prune_old_logs(&dir, "bypass-ui.log", core_lib::log_prune::LOG_RETENTION);
     let appender = tracing_appender::rolling::daily(dir, "bypass-ui.log");
     let (writer, _guard) = tracing_appender::non_blocking(appender);
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_writer(writer)
         .with_ansi(false)
         .init();
@@ -48,6 +83,7 @@ fn main() -> anyhow::Result<()> {
     let state: Arc<Mutex<UiState>> = Arc::new(Mutex::new(UiState {
         client: None,
         config: AppConfig::default(),
+        adapters: Vec::new(),
     }));
 
     // tao 事件循环 + slint。
@@ -57,6 +93,9 @@ fn main() -> anyhow::Result<()> {
         .build(&event_loop)?;
 
     let app = AppWindow::new()?;
+    // 托盘应用：关闭窗口 = 隐藏到托盘，不退出（核心独立运行不受影响）。
+    app.window()
+        .on_close_requested(move || slint::CloseRequestResponse::HideWindow);
     let tray = tray::Tray::new()?;
     let _ = tray::SHARED_TRAY.set(tray::StaticTray(tray));
 
@@ -93,6 +132,46 @@ fn main() -> anyhow::Result<()> {
                     }
                 });
             }
+        });
+    }
+
+    // ---- 连接核心后填充网卡下拉框（委托给公共函数，失败静默——轮询任务也会重试）----
+    {
+        let state = state.clone();
+        let app_weak = app.as_weak();
+        let rt = rt.clone();
+        rt.spawn(async move {
+            refresh_adapters(state, app_weak).await;
+        });
+    }
+
+    // ---- UI 回调：下拉框选择网卡 ----
+    {
+        let state = state.clone();
+        let app_weak = app.as_weak();
+        let rt = rt.clone();
+        app.on_adapter_changed(move |idx| {
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            let rt = rt.clone();
+            rt.spawn(async move {
+                let mut st = state.lock().await;
+                if let Some(info) = st.adapters.get(idx as usize) {
+                    st.config.adapter_id = info.id.clone();
+                    // 立即落盘，避免启用时才发现未保存。
+                    let cfg = st.config.clone();
+                    if let Some(c) = st.client.as_mut() {
+                        if let Err(e) = c.update_config(&cfg).await {
+                            let app_weak = app_weak.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(app) = app_weak.upgrade() {
+                                    app.set_config_error(format!("保存网卡选择失败: {e}").into());
+                                }
+                            });
+                        }
+                    }
+                }
+            });
         });
     }
 
@@ -268,27 +347,99 @@ fn main() -> anyhow::Result<()> {
                 let rt = rt.clone();
                 rt.spawn(async move {
                     // 网络调用在持锁范围内完成，随后释放锁再更新 UI。
-                    let snapshot = {
+                    let mut snapshot = {
                         let mut st = state.lock().await;
                         match st.client.as_mut() {
                             Some(c) => c.get_status().await.ok(),
                             None => None,
                         }
                     };
+
+                    // 未连接 → 尝试重连（核心服务可能晚于 UI 启动或重启过）。
+                    if snapshot.is_none() {
+                        let (reconnected, status_ok, cfg_ok, adapters_ok) = {
+                            let mut st = state.lock().await;
+                            match ipc_client::IpcClient::connect().await {
+                                Ok(mut c) => {
+                                    let status_ok = c.get_status().await.ok();
+                                    let cfg_ok = c.get_config().await.ok();
+                                    let adapters_ok = c.list_adapters().await.ok();
+                                    st.client = Some(c);
+                                    (true, status_ok, cfg_ok, adapters_ok)
+                                }
+                                Err(_) => (false, None, None, None),
+                            }
+                        };
+                        // 重连成功后同步一次 UI（否则界面停在“未连接”）。握手
+                        // 失败视为未连上，还原 client = None，等下轮再试。
+                        if !reconnected {
+                            return;
+                        }
+                        let (cfg, adapter_list) = {
+                            let mut st = state.lock().await;
+                            match (status_ok.as_ref(), cfg_ok, adapters_ok) {
+                                (Some(_), Some(cfg), Some(list)) => {
+                                    st.config = cfg.clone();
+                                    st.adapters = list.clone();
+                                    (Some(cfg), Some(list))
+                                }
+                                _ => {
+                                    // 握手不完整：回滚连接，保持“未连接”语义。
+                                    st.client = None;
+                                    (None, None)
+                                }
+                            }
+                        };
+                        if let (Some(cfg), Some(list)) = (cfg, adapter_list) {
+                            let sel = list.iter().position(|a| a.id == cfg.adapter_id);
+                            let names: Vec<SharedString> =
+                                list.iter().map(|a| a.name.clone().into()).collect();
+                            let app_weak = app_weak.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(app) = app_weak.upgrade() {
+                                    app.set_bypass_ip_text(cfg.bypass_ip.to_string().into());
+                                    app.set_mode_index(match cfg.switch_mode {
+                                        SwitchMode::RouteOverlay => 0,
+                                        SwitchMode::AdapterReconfig => 1,
+                                    });
+                                    app.set_interval_secs(cfg.health_check_interval_secs as i32);
+                                    app.set_failure_threshold(cfg.failure_threshold as i32);
+                                    app.set_auto_reenable(cfg.auto_reenable_after_recovery);
+                                    app.set_notifications(cfg.notifications_enabled);
+                                    app.set_has_config(true);
+                                    app.set_adapter_names(ModelRc::from(Rc::new(VecModel::from(
+                                        names,
+                                    ))));
+                                    app.set_adapter_index(sel.map(|i| i as i32).unwrap_or(-1));
+                                }
+                            });
+                        }
+                        // 重连当轮就拿到了新状态，直接用它刷新。
+                        snapshot = status_ok;
+                    }
+
+                    // get_status 连续失败视为连接失效，丢弃 client 触发下轮重连。
+                    if snapshot.is_none() {
+                        let mut st = state.lock().await;
+                        if let Some(c) = st.client.as_mut() {
+                            if c.get_status().await.is_err() {
+                                st.client = None;
+                            }
+                        }
+                        return;
+                    }
                     let Some(rs) = snapshot else { return };
 
                     let (txt, tray_state, is_fb) = match &rs.health {
-                        HealthStatus::Idle => (
-                            "直连（未启用）".to_string(),
-                            tray::TrayState::Direct,
-                            false,
-                        ),
-                        HealthStatus::Healthy => (
-                            "旁路由生效".to_string(),
-                            tray::TrayState::Bypass,
-                            false,
-                        ),
-                        HealthStatus::Degraded { consecutive_failures } => (
+                        HealthStatus::Idle => {
+                            ("直连（未启用）".to_string(), tray::TrayState::Direct, false)
+                        }
+                        HealthStatus::Healthy => {
+                            ("旁路由生效".to_string(), tray::TrayState::Bypass, false)
+                        }
+                        HealthStatus::Degraded {
+                            consecutive_failures,
+                        } => (
                             format!("探测中（失败 {consecutive_failures} 次）"),
                             tray::TrayState::Bypass,
                             false,
@@ -298,11 +449,9 @@ fn main() -> anyhow::Result<()> {
                             tray::TrayState::Fallback,
                             true,
                         ),
-                        HealthStatus::Recovered => (
-                            "检测恢复".to_string(),
-                            tray::TrayState::Direct,
-                            false,
-                        ),
+                        HealthStatus::Recovered => {
+                            ("检测恢复".to_string(), tray::TrayState::Direct, false)
+                        }
                     };
                     let is_enabled = rs.is_enabled;
 
@@ -352,6 +501,11 @@ fn main() -> anyhow::Result<()> {
                         a.invoke_toggle_bypass();
                     }
                 }
+                Some(tray::TrayAction::OpenSettings) => {
+                    if let Some(a) = app_weak.upgrade() {
+                        a.window().show().ok();
+                    }
+                }
                 Some(tray::TrayAction::OpenLogs) => {
                     let _ = std::process::Command::new("explorer")
                         .arg(r"C:\ProgramData\BypassTool\logs")
@@ -367,6 +521,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     app.show()?;
+    // 托盘常驻：窗口隐藏/无可见 UI 也不退出事件循环，直到显式 quit。
     slint::run_event_loop_until_quit()?;
 
     Ok(())

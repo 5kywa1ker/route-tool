@@ -12,6 +12,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
     Toggle,
+    OpenSettings,
     OpenLogs,
     Quit,
 }
@@ -31,6 +32,7 @@ pub enum TrayState {
 pub struct Tray {
     _tray: TrayIcon,
     toggle_id: tray_icon::menu::MenuId,
+    settings_id: tray_icon::menu::MenuId,
     logs_id: tray_icon::menu::MenuId,
     quit_id: tray_icon::menu::MenuId,
 }
@@ -66,6 +68,7 @@ impl Tray {
         let quit_item = MenuItem::new("退出", true, None);
 
         let toggle_id = toggle_item.id().clone();
+        let settings_id = settings_item.id().clone();
         let logs_id = logs_item.id().clone();
         let quit_id = quit_item.id().clone();
 
@@ -92,6 +95,7 @@ impl Tray {
         Ok(Self {
             _tray: tray,
             toggle_id,
+            settings_id,
             logs_id,
             quit_id,
         })
@@ -103,6 +107,8 @@ impl Tray {
         if let Ok(ev) = receiver.try_recv() {
             if ev.id == self.toggle_id {
                 return Some(TrayAction::Toggle);
+            } else if ev.id == self.settings_id {
+                return Some(TrayAction::OpenSettings);
             } else if ev.id == self.logs_id {
                 return Some(TrayAction::OpenLogs);
             } else if ev.id == self.quit_id {
@@ -115,10 +121,7 @@ impl Tray {
     /// 更新托盘图标与提示文案（仅 UI 线程调用）。
     pub fn update_state(&self, state: TrayState) {
         let (icon, tip) = match state {
-            TrayState::Direct => (
-                make_icon(TrayState::Direct).ok(),
-                "旁路由切换工具 - 直连",
-            ),
+            TrayState::Direct => (make_icon(TrayState::Direct).ok(), "旁路由切换工具 - 直连"),
             TrayState::Bypass => (
                 make_icon(TrayState::Bypass).ok(),
                 "旁路由切换工具 - 旁路由生效",

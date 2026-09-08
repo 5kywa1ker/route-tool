@@ -24,7 +24,7 @@ jobs:
         uses: swatinem/rust-cache@v2
 
       - name: Build release binaries
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --target x86_64-pc-windows-msvc
 
       - name: Run tests
         run: cargo test --workspace --release

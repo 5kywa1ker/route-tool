@@ -19,8 +19,7 @@ pub async fn query_dhcp_enabled(iface: &str) -> Option<bool> {
                 || lower.contains("enabled")
                 || line.contains("启用");
             // 行里同时含 enabled/是 才算 true；netsh 输出 "DHCP enabled: No"。
-            let no_flag = lower.contains("no")
-                || line.contains('否');
+            let no_flag = lower.contains("no") || line.contains('否');
             return Some(is_yes && !no_flag);
         }
     }

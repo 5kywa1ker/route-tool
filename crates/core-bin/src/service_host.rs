@@ -83,7 +83,8 @@ pub fn install_service() -> anyhow::Result<()> {
     };
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)?;
+    let manager =
+        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)?;
     let exe = std::env::current_exe()?;
     let config = ServiceInfo {
         name: OsString::from(SERVICE_NAME),

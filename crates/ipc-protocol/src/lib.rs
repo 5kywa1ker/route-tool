@@ -57,6 +57,18 @@ pub struct SwitchHandle {
     pub next_hop: Option<IpAddr>,
     /// AdapterReconfig 下仅作标记。
     pub adapter_id: Option<String>,
+    /// RouteOverlay 的附加路由条目（如 128.0.0.0/1），disable 时一并删除。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_routes: Vec<HandleRoute>,
+}
+
+/// 句柄中的附加路由条目。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandleRoute {
+    /// 目标前缀，形如 "128.0.0.0/1"。
+    pub destination_prefix: String,
+    pub if_index: u32,
+    pub if_luid: u64,
 }
 
 /// 网络状态（路由层）。
@@ -111,7 +123,8 @@ pub enum HealthStatus {
     Fallback,
     /// 检测恢复。
     Recovered,
-}/// 应用配置（与 core-lib 的 AppConfig 对应）。
+}
+/// 应用配置（与 core-lib 的 AppConfig 对应）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub adapter_id: String,
@@ -177,13 +190,38 @@ pub struct RpcResponse {
     pub id: u64,
     #[serde(flatten)]
     pub result: RpcOutcome,
+    /// 服务端能力：协议版本（能力协商，§4 预留字段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u32>,
+    /// 服务端能力：支持的切换模式（能力协商，§4 预留字段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_modes: Option<Vec<SwitchMode>>,
+}
+
+impl Default for RpcResponse {
+    fn default() -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            id: 0,
+            result: RpcOutcome::Ok {
+                result: serde_json::Value::Null,
+            },
+            protocol_version: Some(PROTOCOL_VERSION),
+            supported_modes: Some(vec![SwitchMode::RouteOverlay, SwitchMode::AdapterReconfig]),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RpcOutcome {
-    Ok { #[serde(rename = "result")] result: serde_json::Value },
-    Err { error: RpcError },
+    Ok {
+        #[serde(rename = "result")]
+        result: serde_json::Value,
+    },
+    Err {
+        error: RpcError,
+    },
 }
 
 /// RPC 错误。
@@ -305,6 +343,28 @@ mod tests {
     }
 
     #[test]
+    fn rpc_response_carries_capabilities() {
+        let resp = RpcResponse::default();
+        let text = serde_json::to_string(&resp).unwrap();
+        assert!(text.contains("protocol_version"));
+        assert!(text.contains("supported_modes"));
+
+        let back: RpcResponse = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.protocol_version, Some(PROTOCOL_VERSION));
+        assert_eq!(
+            back.supported_modes.as_deref(),
+            Some(&[SwitchMode::RouteOverlay, SwitchMode::AdapterReconfig][..])
+        );
+
+        // 旧消息（无能力字段）仍可解析，字段落为 None。
+        let legacy: RpcResponse =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"result":null}"#).unwrap();
+        assert_eq!(legacy.id, 1);
+        assert!(legacy.protocol_version.is_none());
+        assert!(legacy.supported_modes.is_none());
+    }
+
+    #[test]
     fn rpc_response_ok_outcome_round_trip() {
         let resp = RpcResponse {
             jsonrpc: "2.0".into(),
@@ -312,6 +372,7 @@ mod tests {
             result: RpcOutcome::Ok {
                 result: serde_json::json!({ "is_enabled": false }),
             },
+            ..Default::default()
         };
         let text = serde_json::to_string(&resp).unwrap();
         assert!(text.contains(r#""result""#));
@@ -335,6 +396,7 @@ mod tests {
                     data: None,
                 },
             },
+            ..Default::default()
         };
         let text = serde_json::to_string(&resp).unwrap();
         let back: RpcResponse = serde_json::from_str(&text).unwrap();

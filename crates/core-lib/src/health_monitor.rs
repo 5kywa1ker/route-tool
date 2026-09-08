@@ -4,13 +4,15 @@
 //! 仅在旁路由 enabled 时运行。
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{broadcast, Mutex, RwLock, watch};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::{error, info, warn};
 
 use crate::net_inspector::NetInspector;
+use crate::state_store::StateStore;
 use crate::switch_engine::SwitchStrategy;
 use crate::{
     BypassTarget, HealthEvent, HealthEventType, HealthStatus, Result, RuntimeState, SwitchHandle,
@@ -42,6 +44,10 @@ pub struct HealthCtx {
     pub handle: Arc<Mutex<Option<SwitchHandle>>>,
     pub runtime: Arc<RwLock<RuntimeState>>,
     pub event_tx: broadcast::Sender<HealthEvent>,
+    /// 运行状态落盘（回退/恢复也必须持久化，避免重启读到陈旧状态）。
+    pub store: StateStore,
+    /// 共享世代计数器：Controller 每次 stop 递增，旧世代循环停止产生副作用。
+    pub generation: Arc<AtomicU64>,
 }
 
 /// 健康检测参数（从 AppConfig 派生的快照）。
@@ -52,14 +58,12 @@ pub struct HealthParams {
     pub interval: Duration,
     pub threshold: u32,
     pub auto_reenable: bool,
+    /// 本循环的世代号（与 ctx.generation 不一致说明已被新循环取代）。
+    pub generation: u64,
 }
 
 /// 运行健康检测循环，直到 cancel 收到 true。
-pub async fn run_loop(
-    ctx: HealthCtx,
-    params: HealthParams,
-    mut cancel: watch::Receiver<bool>,
-) {
+pub async fn run_loop(ctx: HealthCtx, params: HealthParams, mut cancel: watch::Receiver<bool>) {
     let mut timer = tokio::time::interval(params.interval);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut state = HealthState::Idle;
@@ -86,6 +90,10 @@ pub async fn run_loop(
 
 /// 单次探测逻辑。
 async fn tick(ctx: &HealthCtx, params: &HealthParams, state: &mut HealthState) {
+    // 旧世代循环（已被新的 enable/disable 取代）不再产生任何副作用。
+    if ctx.generation.load(Ordering::SeqCst) != params.generation {
+        return;
+    }
     // Idle 不探测（由 Controller 在启用时启动循环）。
     if *state == HealthState::Idle {
         return;
@@ -97,7 +105,7 @@ async fn tick(ctx: &HealthCtx, params: &HealthParams, state: &mut HealthState) {
         false => handle_failure(ctx, params, state).await,
     };
 
-    update_runtime_health(ctx, state, consecutive, params.auto_reenable).await;
+    update_runtime_health(ctx, state, consecutive).await;
 }
 
 /// 返回 Ping 是否可达。
@@ -159,17 +167,35 @@ async fn handle_failure(
         HealthState::Degraded(n) => {
             let n = *n + 1;
             *state = HealthState::Degraded(n);
-            emit(ctx, HealthEventType::ProbeFailed { consecutive_count: n }).await;
+            emit(
+                ctx,
+                HealthEventType::ProbeFailed {
+                    consecutive_count: n,
+                },
+            )
+            .await;
             if n >= params.threshold {
-                fallback(ctx, state, format!("连续探测失败 {n}/{} 次", params.threshold)).await;
+                fallback(
+                    ctx,
+                    params,
+                    state,
+                    format!("连续探测失败 {n}/{} 次", params.threshold),
+                )
+                .await;
             }
             Some(n)
         }
         HealthState::Healthy => {
             *state = HealthState::Degraded(1);
-            emit(ctx, HealthEventType::ProbeFailed { consecutive_count: 1 }).await;
+            emit(
+                ctx,
+                HealthEventType::ProbeFailed {
+                    consecutive_count: 1,
+                },
+            )
+            .await;
             if 1 >= params.threshold {
-                fallback(ctx, state, "阈值=1，首次探测即失败".to_string()).await;
+                fallback(ctx, params, state, "阈值=1，首次探测即失败".to_string()).await;
             }
             Some(1)
         }
@@ -179,7 +205,11 @@ async fn handle_failure(
 }
 
 /// 触发自动回退：禁用当前策略（若句柄仍存在），更新运行状态，发事件。
-async fn fallback(ctx: &HealthCtx, state: &mut HealthState, reason: String) {
+async fn fallback(ctx: &HealthCtx, params: &HealthParams, state: &mut HealthState, reason: String) {
+    if ctx.generation.load(Ordering::SeqCst) != params.generation {
+        info!("health loop stale (generation changed); skip fallback");
+        return;
+    }
     info!("auto fallback triggered: {reason}");
     {
         let guard = ctx.handle.lock().await;
@@ -191,13 +221,15 @@ async fn fallback(ctx: &HealthCtx, state: &mut HealthState, reason: String) {
     }
     *ctx.handle.lock().await = None;
 
-    {
+    let snapshot = {
         let mut rs = ctx.runtime.write().await;
         rs.is_enabled = false;
         rs.current_mode = None;
         rs.health = HealthStatus::Fallback;
         rs.last_updated = chrono::Utc::now();
-    }
+        rs.clone()
+    };
+    persist_runtime(ctx, &snapshot);
 
     *state = HealthState::Fallback;
     emit(ctx, HealthEventType::AutoFallbackTriggered { reason }).await;
@@ -229,44 +261,47 @@ async fn ensure_active(ctx: &HealthCtx, params: &HealthParams) {
 
 /// 用配置重新启用旁路由，刷新句柄与运行状态。
 async fn reenable(ctx: &HealthCtx, params: &HealthParams) -> Result<()> {
+    if ctx.generation.load(Ordering::SeqCst) != params.generation {
+        info!("health loop stale (generation changed); skip re-enable");
+        return Ok(());
+    }
     let new_handle = ctx.strategy.enable(&params.target).await?;
     *ctx.handle.lock().await = Some(new_handle);
 
-    {
+    let snapshot = {
         let mut rs = ctx.runtime.write().await;
         rs.is_enabled = true;
         rs.current_mode = Some(params.mode);
         rs.health = HealthStatus::Healthy;
         rs.last_updated = chrono::Utc::now();
-    }
+        rs.clone()
+    };
+    persist_runtime(ctx, &snapshot);
     Ok(())
 }
 
 /// 更新 runtime 的健康状态字段（与状态机保持一致）。
-async fn update_runtime_health(
-    ctx: &HealthCtx,
-    state: &HealthState,
-    consecutive: Option<u32>,
-    auto_reenable: bool,
-) {
+async fn update_runtime_health(ctx: &HealthCtx, state: &HealthState, consecutive: Option<u32>) {
     let mut rs = ctx.runtime.write().await;
     match state {
         HealthState::Idle => rs.health = HealthStatus::Idle,
         HealthState::Healthy => rs.health = HealthStatus::Healthy,
         HealthState::Degraded(_) => {
             let n = consecutive.unwrap_or(1);
-            rs.health = HealthStatus::Degraded { consecutive_failures: n };
+            rs.health = HealthStatus::Degraded {
+                consecutive_failures: n,
+            };
         }
-        HealthState::Fallback => {
-            if auto_reenable {
-                // 若配置了自动重新启用，Fallback 是临时态，标记为 Fallback 即可。
-                rs.health = HealthStatus::Fallback;
-            } else {
-                rs.health = HealthStatus::Fallback;
-            }
-        }
+        HealthState::Fallback => rs.health = HealthStatus::Fallback,
     }
     rs.last_updated = chrono::Utc::now();
+}
+
+/// 将运行状态落盘（健康检测驱动的回退/恢复同样持久化，防止重启后读到陈旧预期）。
+fn persist_runtime(ctx: &HealthCtx, rs: &RuntimeState) {
+    if let Err(e) = ctx.store.save_runtime(rs) {
+        warn!("持久化运行状态失败: {e}");
+    }
 }
 
 async fn emit(ctx: &HealthCtx, event_type: HealthEventType) {
@@ -286,6 +321,7 @@ async fn emit(ctx: &HealthCtx, event_type: HealthEventType) {
 mod tests {
     use super::*;
     use crate::net_inspector::NetInspector;
+    use crate::state_store::StateStore;
     use crate::switch_engine::SwitchStrategy;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -310,9 +346,15 @@ mod tests {
 
         async fn ping(&self, _ip: IpAddr, _timeout_ms: u32) -> crate::Result<bool> {
             // fail_first=N：前 N 次失败，之后成功；u32::MAX 视为一直失败。
-            let prev = self.fail_first.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                if v == 0 { Some(0) } else { Some(v - 1) }
-            });
+            let prev = self
+                .fail_first
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                    if v == 0 {
+                        Some(0)
+                    } else {
+                        Some(v - 1)
+                    }
+                });
             Ok(matches!(prev, Ok(0)))
         }
     }
@@ -335,6 +377,7 @@ mod tests {
                 destination_prefix: Some("0.0.0.0/0".into()),
                 next_hop: Some("10.0.0.1".parse().unwrap()),
                 adapter_id: None,
+                extra_routes: vec![],
             })
         }
 
@@ -347,7 +390,9 @@ mod tests {
             Ok(true)
         }
 
-        async fn reconcile_on_startup(&self) -> crate::Result<crate::switch_engine::ReconcileAction> {
+        async fn reconcile_on_startup(
+            &self,
+        ) -> crate::Result<crate::switch_engine::ReconcileAction> {
             Ok(crate::switch_engine::ReconcileAction::NoAction)
         }
     }
@@ -356,6 +401,15 @@ mod tests {
         inspector: Arc<dyn NetInspector>,
         strategy: Arc<dyn SwitchStrategy>,
     ) -> (HealthCtx, tokio::sync::broadcast::Receiver<HealthEvent>) {
+        // 每个测试用例独立的 StateStore 目录，避免并行测试写同一文件。
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("BypassToolHealthTest_{}_{seq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = StateStore::new(dir);
+        let _ = store.ensure_dirs();
+
         let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
         let ctx = HealthCtx {
             inspector,
@@ -367,6 +421,7 @@ mod tests {
                 destination_prefix: Some("0.0.0.0/0".into()),
                 next_hop: Some("10.0.0.1".parse().unwrap()),
                 adapter_id: None,
+                extra_routes: vec![],
             }))),
             runtime: Arc::new(RwLock::new(RuntimeState {
                 is_enabled: true,
@@ -375,6 +430,8 @@ mod tests {
                 ..RuntimeState::default()
             })),
             event_tx,
+            store,
+            generation: Arc::new(AtomicU64::new(0)),
         };
         (ctx, event_rx)
     }
@@ -390,6 +447,7 @@ mod tests {
             interval: Duration::from_secs(3600), // 手动 tick，不受定时影响
             threshold,
             auto_reenable,
+            generation: 0,
         }
     }
 
@@ -401,7 +459,9 @@ mod tests {
     #[tokio::test]
     async fn healthy_stays_healthy_on_success() {
         let (ctx, rx) = test_ctx(
-            Arc::new(MockInspector { fail_first: AtomicU32::new(0) }),
+            Arc::new(MockInspector {
+                fail_first: AtomicU32::new(0),
+            }),
             Arc::new(MockStrategy::default()),
         );
         let p = params(3, false);
@@ -418,7 +478,9 @@ mod tests {
     #[tokio::test]
     async fn failures_degrade_then_fallback_at_threshold() {
         let (ctx, mut rx) = test_ctx(
-            Arc::new(MockInspector { fail_first: AtomicU32::new(u32::MAX) }),
+            Arc::new(MockInspector {
+                fail_first: AtomicU32::new(u32::MAX),
+            }),
             Arc::new(MockStrategy::default()),
         );
         let p = params(3, false);
@@ -428,7 +490,12 @@ mod tests {
         tick(&ctx, &p, &mut state).await;
         assert_eq!(state, HealthState::Degraded(1));
         let evt = next_event(&mut rx).await;
-        assert!(matches!(evt.event_type, HealthEventType::ProbeFailed { consecutive_count: 1 }));
+        assert!(matches!(
+            evt.event_type,
+            HealthEventType::ProbeFailed {
+                consecutive_count: 1
+            }
+        ));
 
         // 第 2 次失败：Degraded(2)。
         tick(&ctx, &p, &mut state).await;
@@ -444,17 +511,32 @@ mod tests {
         drop(rs);
 
         let evt = next_event(&mut rx).await; // ProbeFailed 2
-        assert!(matches!(evt.event_type, HealthEventType::ProbeFailed { consecutive_count: 2 }));
+        assert!(matches!(
+            evt.event_type,
+            HealthEventType::ProbeFailed {
+                consecutive_count: 2
+            }
+        ));
         let evt = next_event(&mut rx).await; // ProbeFailed 3
-        assert!(matches!(evt.event_type, HealthEventType::ProbeFailed { consecutive_count: 3 }));
+        assert!(matches!(
+            evt.event_type,
+            HealthEventType::ProbeFailed {
+                consecutive_count: 3
+            }
+        ));
         let evt = next_event(&mut rx).await; // AutoFallbackTriggered
-        assert!(matches!(evt.event_type, HealthEventType::AutoFallbackTriggered { .. }));
+        assert!(matches!(
+            evt.event_type,
+            HealthEventType::AutoFallbackTriggered { .. }
+        ));
     }
 
     #[tokio::test]
     async fn recovery_from_degraded_clears_count() {
         let (ctx, mut rx) = test_ctx(
-            Arc::new(MockInspector { fail_first: AtomicU32::new(1) }),
+            Arc::new(MockInspector {
+                fail_first: AtomicU32::new(1),
+            }),
             Arc::new(MockStrategy::default()),
         );
         let p = params(3, false);
@@ -467,7 +549,10 @@ mod tests {
         assert_eq!(state, HealthState::Healthy);
 
         let evt = next_event(&mut rx).await; // ProbeFailed 1
-        assert!(matches!(evt.event_type, HealthEventType::ProbeFailed { .. }));
+        assert!(matches!(
+            evt.event_type,
+            HealthEventType::ProbeFailed { .. }
+        ));
         let evt = next_event(&mut rx).await; // ProbeRecovered
         assert!(matches!(evt.event_type, HealthEventType::ProbeRecovered));
     }
@@ -477,7 +562,9 @@ mod tests {
         let strategy = Arc::new(MockStrategy::default());
         // 首次探测失败，其后恢复（fail_first=1）。
         let (ctx, mut rx) = test_ctx(
-            Arc::new(MockInspector { fail_first: AtomicU32::new(1) }),
+            Arc::new(MockInspector {
+                fail_first: AtomicU32::new(1),
+            }),
             strategy.clone(),
         );
         let p = params(1, true); // 阈值 1：首次失败即回退
@@ -506,7 +593,9 @@ mod tests {
     async fn fallback_without_auto_reenable_stays_direct() {
         let strategy = Arc::new(MockStrategy::default());
         let (ctx, _rx) = test_ctx(
-            Arc::new(MockInspector { fail_first: AtomicU32::new(u32::MAX) }),
+            Arc::new(MockInspector {
+                fail_first: AtomicU32::new(u32::MAX),
+            }),
             strategy.clone(),
         );
         let p = params(1, false);
@@ -522,7 +611,9 @@ mod tests {
 
     #[tokio::test]
     async fn idle_never_probes() {
-        let inspector = Arc::new(MockInspector { fail_first: AtomicU32::new(u32::MAX) });
+        let inspector = Arc::new(MockInspector {
+            fail_first: AtomicU32::new(u32::MAX),
+        });
         let (ctx, mut rx) = test_ctx(inspector.clone(), Arc::new(MockStrategy::default()));
         let p = params(3, false);
         let mut state = HealthState::Idle;
@@ -534,5 +625,31 @@ mod tests {
         drop(rs);
         // 无事件产生。
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_generation_loop_produces_no_side_effects() {
+        let strategy = Arc::new(MockStrategy::default());
+        let (ctx, mut rx) = test_ctx(
+            Arc::new(MockInspector {
+                fail_first: AtomicU32::new(u32::MAX),
+            }),
+            strategy.clone(),
+        );
+        let p = params(1, false);
+        let mut state = HealthState::Healthy;
+
+        // 模拟循环已被新的 enable/disable 取代：世代前进。
+        ctx.generation.store(1, Ordering::SeqCst);
+
+        // 在途 tick 不再探测、不回退、不重建。
+        tick(&ctx, &p, &mut state).await;
+        assert_eq!(state, HealthState::Healthy);
+        assert_eq!(strategy.disable_count.load(Ordering::SeqCst), 0);
+        assert_eq!(strategy.enable_count.load(Ordering::SeqCst), 0);
+        assert!(rx.try_recv().is_err());
+
+        // 落盘状态不被旧世代污染：runtime_state.json 不存在（从未写入）。
+        assert!(!ctx.store.base_dir().join("runtime_state.json").exists());
     }
 }
