@@ -405,7 +405,7 @@ mod tests {
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let seq = SEQ.fetch_add(1, Ordering::SeqCst);
         let dir =
-            std::env::temp_dir().join(format!("BypassToolHealthTest_{}_{seq}", std::process::id()));
+            std::env::temp_dir().join(format!("RouteToolHealthTest_{}_{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = StateStore::new(dir);
         let _ = store.ensure_dirs();

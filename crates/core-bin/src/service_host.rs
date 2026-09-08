@@ -15,9 +15,9 @@ use windows_service::{
 };
 
 /// 服务名。
-pub const SERVICE_NAME: &str = "BypassToolCore";
+pub const SERVICE_NAME: &str = "RouteToolCore";
 /// 服务显示名。
-pub const SERVICE_DISPLAY: &str = "Bypass Tool Core";
+pub const SERVICE_DISPLAY: &str = "RouteTool Core";
 
 define_windows_service!(ffi_service_main, my_service_main);
 

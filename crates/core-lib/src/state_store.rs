@@ -1,6 +1,6 @@
 //! 状态与配置持久化：原子写入（临时文件 + fsync + rename）。
 //!
-//! 数据落在 <ProgramData>\BypassTool\ 下（服务以 SYSTEM 运行，不依赖用户目录）。
+//! 数据落在 <ProgramData>\RouteTool\ 下（服务以 SYSTEM 运行，不依赖用户目录）。
 
 use std::fs;
 use std::io::Write;
@@ -12,10 +12,27 @@ use serde::Serialize;
 use crate::{AdapterSnapshot, AppConfig, CoreError, Result, RuntimeState};
 
 /// 数据根目录。
-pub const BASE_DIR: &str = r"C:\ProgramData\BypassTool";
+pub const BASE_DIR: &str = r"C:\ProgramData\RouteTool";
+/// 旧版数据目录（应用曾名 BypassTool）。首次以新目录启动时整体迁走，保留用户配置与日志。
+const LEGACY_BASE_DIR: &str = r"C:\ProgramData\BypassTool";
 pub const CONFIG_FILE: &str = "config.json";
 pub const RUNTIME_FILE: &str = "runtime_state.json";
 pub const SNAPSHOT_FILE: &str = "adapter_snapshot.json";
+
+/// 应用改名（BypassTool -> RouteTool）后的一次性数据迁移：
+/// 新目录不存在而旧目录存在时，把旧目录整体 rename 过来，保留配置与日志。
+///
+/// 尽力而为：旧服务仍占用文件导致 rename 失败时静默放弃，
+/// 新目录从零开始，旧数据原样保留，不影响功能。
+fn migrate_legacy_dir(base: &Path) {
+    if base.exists() {
+        return;
+    }
+    let legacy = Path::new(LEGACY_BASE_DIR);
+    if legacy.is_dir() {
+        let _ = fs::rename(legacy, base);
+    }
+}
 
 /// 状态存储。负责目录初始化与两类文件（配置 / 运行状态 / 快照）的读写。
 #[derive(Debug, Clone)]
@@ -40,6 +57,11 @@ impl StateStore {
 
     /// 确保目录存在（含日志子目录）。
     pub fn ensure_dirs(&self) -> Result<()> {
+        // 仅对默认数据目录做旧目录迁移：测试会用临时目录构造 StateStore，
+        // 不加这个守卫，本机存在真实旧目录时跑测试会把它误 rename 进临时目录。
+        if self.base_dir == Path::new(BASE_DIR) {
+            migrate_legacy_dir(&self.base_dir);
+        }
         fs::create_dir_all(self.base_dir.join("logs"))
             .map_err(|e| CoreError::Persistence(format!("创建数据目录失败: {e}")))?;
         Ok(())
@@ -140,7 +162,7 @@ mod tests {
 
     fn temp_store(tag: &str) -> StateStore {
         let dir =
-            std::env::temp_dir().join(format!("BypassToolTest_{tag}_{:?}", std::process::id()));
+            std::env::temp_dir().join(format!("RouteToolTest_{tag}_{:?}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         StateStore::new(dir)
     }

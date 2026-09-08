@@ -56,7 +56,7 @@ async fn refresh_adapters(state: Arc<Mutex<UiState>>, app_weak: slint::Weak<AppW
 }
 
 fn init_logging() {
-    let dir = std::env::temp_dir().join("BypassTool");
+    let dir = std::env::temp_dir().join("RouteTool");
     let _ = std::fs::create_dir_all(&dir);
     // 日志保留巡检（§2：保留 7 天），UI 与 core 各自清理自己的前缀。
     core_lib::log_prune::prune_old_logs(&dir, "bypass-ui.log", core_lib::log_prune::LOG_RETENTION);
@@ -326,7 +326,7 @@ fn main() -> anyhow::Result<()> {
 
     // ---- UI 回调：打开日志目录 ----
     app.on_open_logs(|| {
-        let dir = r"C:\ProgramData\BypassTool\logs";
+        let dir = r"C:\ProgramData\RouteTool\logs";
         let _ = std::process::Command::new("explorer").arg(dir).spawn();
     });
 
@@ -510,7 +510,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 Some(tray::TrayAction::OpenLogs) => {
                     let _ = std::process::Command::new("explorer")
-                        .arg(r"C:\ProgramData\BypassTool\logs")
+                        .arg(r"C:\ProgramData\RouteTool\logs")
                         .spawn();
                 }
                 Some(tray::TrayAction::Quit) => {

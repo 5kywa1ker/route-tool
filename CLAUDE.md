@@ -33,9 +33,9 @@ installer/        # Inno Setup .iss (runs bypass-core.exe --install-service duri
 ## Conventions
 
 - Async: tokio everywhere in core; `async_trait` for the strategy traits.
-- Persistence: `%ProgramData%\BypassTool\config.json` + `runtime_state.json`, temp-file+fsync+rename atomic writes.
-- Pipe name `\\.\pipe\BypassToolCore`; line-delimited JSON-RPC 2.0, server pushes events after `SubscribeEvents`; pipe DACL restricted to SYSTEM/Administrators/Authenticated Users.
-- Log: tracing + tracing-appender daily rolling, 7 days retention (`core_lib::log_prune`), `%ProgramData%\BypassTool\logs\`.
+- Persistence: `%ProgramData%\RouteTool\config.json` + `runtime_state.json`, temp-file+fsync+rename atomic writes.
+- Pipe name `\\.\pipe\RouteToolCore`; line-delimited JSON-RPC 2.0, server pushes events after `SubscribeEvents`; pipe DACL restricted to SYSTEM/Administrators/Authenticated Users.
+- Log: tracing + tracing-appender daily rolling, 7 days retention (`core_lib::log_prune`), `%ProgramData%\RouteTool\logs\`.
 - IPv4 only (MVP); no IPv6.
 - RouteOverlay adds `0.0.0.0/1` + `128.0.0.0/1` via bypass_ip (longest-prefix-match wins; not metric-based).
 - UI is optional by design — core must run and auto-fallback with UI closed.

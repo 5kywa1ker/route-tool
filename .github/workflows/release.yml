@@ -69,26 +69,26 @@ jobs:
 
           # ISCC 失败时必须显式抛错：否则步骤会“假成功”，
           # 错误会推迟到 upload-artifact / gh-release 才以 “no files matched” 暴露。
-          & $iscc /DMyAppVersion="$version" installer\BypassTool.iss
+          & $iscc /DMyAppVersion="$version" installer\RouteTool.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC compile failed (exit $LASTEXITCODE)" }
 
-          $setup = Get-Item "installer\Output\BypassTool-Setup-$version.exe" -ErrorAction SilentlyContinue
-          if (-not $setup) { throw "Installer output not found at installer\Output\BypassTool-Setup-$version.exe" }
+          $setup = Get-Item "installer\Output\RouteTool-Setup-$version.exe" -ErrorAction SilentlyContinue
+          if (-not $setup) { throw "Installer output not found at installer\Output\RouteTool-Setup-$version.exe" }
           Write-Host "Built installer: $($setup.FullName) ($([math]::Round($setup.Length / 1MB, 2)) MB)"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: BypassTool-${{ steps.version.outputs.version }}
+          name: RouteTool-${{ steps.version.outputs.version }}
           path: |
             target/x86_64-pc-windows-msvc/release/bypass-core.exe
             target/x86_64-pc-windows-msvc/release/bypass-ui.exe
-            installer/Output/BypassTool-Setup-*.exe
+            installer/Output/RouteTool-Setup-*.exe
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: installer/Output/BypassTool-Setup-*.exe
+          files: installer/Output/RouteTool-Setup-*.exe
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') }}

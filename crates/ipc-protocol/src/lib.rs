@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// 协议版本，用于能力协商。
 pub const PROTOCOL_VERSION: u32 = 1;
 /// Named Pipe 名称。
-pub const PIPE_NAME: &str = r"\\.\pipe\BypassToolCore";
+pub const PIPE_NAME: &str = r"\\.\pipe\RouteToolCore";
 
 /// 切换模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

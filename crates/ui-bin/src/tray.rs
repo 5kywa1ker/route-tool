@@ -85,9 +85,9 @@ impl Tray {
         let icon = make_icon(TrayState::Direct)?;
 
         let tray = TrayIconBuilder::new()
-            .with_id("bypass-ui-tray")
+            .with_id("route-tool-tray")
             .with_icon(icon)
-            .with_tooltip("旁路由切换工具 - 直连")
+            .with_tooltip("RouteTool - 直连")
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(true)
             .build()?;
@@ -121,14 +121,14 @@ impl Tray {
     /// 更新托盘图标与提示文案（仅 UI 线程调用）。
     pub fn update_state(&self, state: TrayState) {
         let (icon, tip) = match state {
-            TrayState::Direct => (make_icon(TrayState::Direct).ok(), "旁路由切换工具 - 直连"),
+            TrayState::Direct => (make_icon(TrayState::Direct).ok(), "RouteTool - 直连"),
             TrayState::Bypass => (
                 make_icon(TrayState::Bypass).ok(),
-                "旁路由切换工具 - 旁路由生效",
+                "RouteTool - 旁路由生效",
             ),
             TrayState::Fallback => (
                 make_icon(TrayState::Fallback).ok(),
-                "旁路由切换工具 - 异常已自动回退",
+                "RouteTool - 异常已自动回退",
             ),
         };
         if let Some(icon) = icon {

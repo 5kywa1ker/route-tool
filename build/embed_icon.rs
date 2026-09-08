@@ -129,6 +129,10 @@ pub fn embed_app_icon() {
     res.set_icon(&icon.display().to_string());
     res.set_language(0x0804); // 简体中文，文件属性里的「语言」
 
+    // 文件属性 / 任务管理器里显示的产品名与描述。
+    res.set("FileDescription", "RouteTool");
+    res.set("ProductName", "RouteTool");
+
     if let Err(e) = res.compile() {
         println!("cargo:warning=failed to embed app icon: {e}");
     }
