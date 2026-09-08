@@ -27,7 +27,9 @@ jobs:
         run: cargo build --release --workspace --target x86_64-pc-windows-msvc
 
       - name: Run tests
-        run: cargo test --workspace --release
+        # 必须与 build 步骤使用同一 --target，否则 cargo 会在 target/release 下
+        # 重新编译全部依赖（产物目录不一致），白白多花一整轮构建时间。
+        run: cargo test --workspace --release --target x86_64-pc-windows-msvc
 
       - name: Extract version from tag
         id: version
@@ -37,12 +39,42 @@ jobs:
           "version=$tag" >> $env:GITHUB_OUTPUT
 
       - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed (exit $LASTEXITCODE)" }
 
       - name: Build installer
         shell: pwsh
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion="${{ steps.version.outputs.version }}" installer\BypassTool.iss
+          $ErrorActionPreference = 'Stop'
+          $version = "${{ steps.version.outputs.version }}"
+
+          # 不要硬编码单一路径：Inno Setup 大版本升级后安装目录可能变化（6 -> 7）。
+          # 依次探测常见安装位置，并回退到 PATH 上的 ISCC。
+          $candidates = @(
+            (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+            (Join-Path $env:ProgramFiles        'Inno Setup 6\ISCC.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 7\ISCC.exe'),
+            (Join-Path $env:ProgramFiles        'Inno Setup 7\ISCC.exe')
+          )
+          $iscc = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if (-not $iscc) {
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $iscc = $cmd.Source }
+          }
+          if (-not $iscc) { throw "ISCC.exe not found - Inno Setup installation failed" }
+          Write-Host "Using ISCC: $iscc"
+
+          # ISCC 失败时必须显式抛错：否则步骤会“假成功”，
+          # 错误会推迟到 upload-artifact / gh-release 才以 “no files matched” 暴露。
+          & $iscc /DMyAppVersion="$version" installer\BypassTool.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC compile failed (exit $LASTEXITCODE)" }
+
+          $setup = Get-Item "installer\Output\BypassTool-Setup-$version.exe" -ErrorAction SilentlyContinue
+          if (-not $setup) { throw "Installer output not found at installer\Output\BypassTool-Setup-$version.exe" }
+          Write-Host "Built installer: $($setup.FullName) ($([math]::Round($setup.Length / 1MB, 2)) MB)"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

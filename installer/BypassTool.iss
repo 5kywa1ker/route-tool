@@ -40,7 +40,11 @@ ArchitecturesAllowed=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 注意：Inno Setup 6 官方安装包并不自带 ChineseSimplified.isl（内置语言里没有中文），
+; 直接写 compiler:Languages\ChineseSimplified.isl 会导致 ISCC 报
+; "Couldn't open include file ..." 并中断编译，进而 CI 找不到安装包产物。
+; 因此这里把官方翻译文件随仓库一起提供，用相对于本脚本的路径引用（CI 环境无关）。
+Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 
 [Files]
 Source: "..\target\x86_64-pc-windows-msvc\release\bypass-core.exe"; DestDir: "{app}"; Flags: ignoreversion
