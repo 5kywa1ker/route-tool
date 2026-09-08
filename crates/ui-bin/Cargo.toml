@@ -19,7 +19,6 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 chrono = { workspace = true }
 slint = "1.14"
-tao = "0.34"
 tray-icon = "0.21"
 windows = { workspace = true }
 
@@ -28,3 +27,6 @@ core-lib = { path = "../core-lib" }
 
 [build-dependencies]
 slint-build = "1.14"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

@@ -2,6 +2,5 @@
 include!("../../build/embed_icon.rs");
 
 fn main() {
-    slint_build::compile("src/appwindow.slint").unwrap();
     embed_app_icon();
 }

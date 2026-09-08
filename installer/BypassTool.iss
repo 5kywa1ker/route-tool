@@ -37,6 +37,8 @@ WizardStyle=modern
 ; Windows 10/11 x64
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
+; 安装包自身图标（向导标题栏 + 生成的 Setup exe 文件图标）
+SetupIconFile=..\assets\app.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
@@ -65,7 +67,9 @@ Filename: "{app}\{#CoreExeName}"; Parameters: "--uninstall-service"; Flags: runh
 Filename: "{app}\{#CoreExeName}"; Parameters: "--install-service"; Flags: runhidden; StatusMsg: "正在安装 BypassToolCore 服务..."
 Filename: "sc"; Parameters: "start {#ServiceName}"; Flags: runhidden; StatusMsg: "正在启动服务..."
 ; UI 托盘（默认勾选立即运行）
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; runasoriginaluser：安装包是管理员权限运行的，不加这个标志 UI 会以提权/管理员身份启动，
+; 托盘图标可能落在另一个会话里，用户桌面上就看不到（还带着不必要的管理员权限）。
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
 Filename: "sc"; Parameters: "stop {#ServiceName}"; Flags: runhidden; RunOnceId: "StopSvc"

@@ -138,20 +138,22 @@ impl Tray {
     }
 }
 
-/// 生成 32x32 纯色图标（灰 / 绿 / 红）。
-fn make_icon(state: TrayState) -> anyhow::Result<Icon> {
-    let (r, g, b) = match state {
-        TrayState::Direct => (0x9Eu8, 0x9Eu8, 0x9Eu8),
-        TrayState::Bypass => (0x2Eu8, 0xE7u8, 0x4Bu8),
-        TrayState::Fallback => (0xE5u8, 0x39u8, 0x35u8),
-    };
-    let size = 32usize;
-    let mut rgba = Vec::with_capacity(size * size * 4);
-    for _ in 0..(size * size) {
-        rgba.push(r);
-        rgba.push(g);
-        rgba.push(b);
-        rgba.push(255);
+/// 32x32 托盘图标的原始 RGBA 像素（由 `scripts/gen_icons.py` 生成）。
+///
+/// 直接内联原始像素，避免运行时再做 PNG/ICO 解码，也省掉一个外部文件依赖：
+/// 托盘图标必须随 exe 一起存在，找不到就等于托盘空白。
+const TRAY_ICON_PX: usize = 32;
+
+fn tray_icon_bytes(state: TrayState) -> &'static [u8] {
+    match state {
+        TrayState::Direct => include_bytes!("../../../assets/tray_direct.rgba"),
+        TrayState::Bypass => include_bytes!("../../../assets/tray_bypass.rgba"),
+        TrayState::Fallback => include_bytes!("../../../assets/tray_fallback.rgba"),
     }
-    Ok(Icon::from_rgba(rgba, size as u32, size as u32)?)
+}
+
+/// 生成 32x32 托盘图标（灰 / 绿 / 红三态）。
+fn make_icon(state: TrayState) -> anyhow::Result<Icon> {
+    let rgba = tray_icon_bytes(state).to_vec();
+    Ok(Icon::from_rgba(rgba, TRAY_ICON_PX as u32, TRAY_ICON_PX as u32)?)
 }

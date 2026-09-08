@@ -1,5 +1,9 @@
 //! bypass-ui.exe：托盘 + 设置窗口。
 
+// Windows：以 GUI 子系统链接，避免启动时闪一个黑色控制台窗口。
+// debug 构建保留控制台，方便直接看到 panic / 日志输出。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod ipc_client;
 mod notify;
 mod tray;
@@ -9,8 +13,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
-use tao::event_loop::EventLoopBuilder;
-use tao::window::Window;
 use tracing_subscriber::EnvFilter;
 
 use ipc_protocol::{AppConfig, HealthStatus, SwitchMode};
@@ -86,12 +88,12 @@ fn main() -> anyhow::Result<()> {
         adapters: Vec::new(),
     }));
 
-    // tao 事件循环 + slint。
-    let event_loop = EventLoopBuilder::<()>::with_user_event().build();
-    let _window: Window = tao::window::WindowBuilder::new()
-        .with_visible(false)
-        .build(&event_loop)?;
-
+    // 事件循环由 Slint（winit 后端）独占持有。
+    //
+    // 这里**不能**再额外创建 tao/winit 的 EventLoop 与窗口：两个 windowing 栈同时
+    // 初始化会互相踩踏，实测表现为启动约 3 秒后 0xC0000374 STATUS_HEAP_CORRUPTION
+    // 直接退出（窗口闪一下就没了，托盘也不出现）。tray-icon 0.21 本身不依赖 tao，
+    // 靠 Slint 的消息泵即可收到菜单事件。
     let app = AppWindow::new()?;
     // 托盘应用：关闭窗口 = 隐藏到托盘，不退出（核心独立运行不受影响）。
     app.window()

@@ -4,6 +4,8 @@ import { Button, ComboBox, LineEdit, SpinBox, CheckBox, GroupBox, GridBox } from
 
 export component AppWindow inherits Window {
     title: "旁路由切换工具";
+    // 标题栏 / 任务栏窗口图标（winit 后端会从这里取）。
+    icon: @image-url("../../../assets/app.png");
     preferred-width: 480px;
     preferred-height: 560px;
 
