@@ -22,20 +22,34 @@ use crate::state::ServerState;
 pub async fn serve(state: Arc<ServerState>, mut shutdown: broadcast::Receiver<()>) {
     info!("IPC server listening on {PIPE_NAME}");
 
+    // SECURITY_ATTRIBUTES 在进程内只构建一次并泄漏给进程生命周期：
+    // 每次 CreateNamedPipeW 都会把 SD 拷进内核对象，但 SA 本身只需在调用期间有效，
+    // 泄漏后可保证所有循环迭代的 create() 都能读到稳定指针。
+    let pipe_sa = match build_pipe_security_attributes() {
+        Ok(p) => p,
+        Err(e) => {
+            error!("构建管道 SECURITY_ATTRIBUTES 失败，IPC 不可用: {e}");
+            // 不无限空转：把错误直接报给上层（服务应记录并停止）。
+            return;
+        }
+    };
+
     loop {
-        // 创建新的 server pipe 实例等待连接。
-        let server: NamedPipeServer = match ServerOptions::new()
-            .first_pipe_instance(false)
-            .create(PIPE_NAME)
-        {
-            Ok(s) => {
-                harden_pipe_acl(&s);
-                s
-            }
-            Err(e) => {
-                error!("创建 pipe 实例失败: {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                continue;
+        // 创建新的 server pipe 实例等待连接。必须通过 create_with_security_attributes_raw
+        // 带上我们预构建的 DACL（SYSTEM/Administrators/AuthUsers）—— 走 create() 默认 DACL
+        // 会被 SERVICE 限制为仅创建者/管理员，UI 用户（Authenticated Users）会 0xC0000022/5
+        // 拒访，进而导致 UI 连不上核心、配置与网卡列表永远拉不到。
+        let server: NamedPipeServer = unsafe {
+            match ServerOptions::new()
+                .first_pipe_instance(false)
+                .create_with_security_attributes_raw(PIPE_NAME, pipe_sa)
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("创建 pipe 实例失败: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
             }
         };
 
@@ -240,66 +254,119 @@ pub async fn connect_client() -> std::io::Result<NamedPipeClient> {
     ClientOptions::new().open(PIPE_NAME)
 }
 
-/// 收紧管道 DACL：仅 SYSTEM / Administrators / Authenticated Users 可访问。
+/// 构建管道使用的 SECURITY_ATTRIBUTES（含宽松 DACL：SYSTEM / Administrators /
+/// Authenticated Users 均可访问）。
 ///
-/// tokio 的 ServerOptions 不支持直接设置安全属性，这里在创建后用
-/// SetKernelObjectSecurity 改写 DACL（SDDL 转换）。失败仅告警不拒绝服务
-/// （默认 DACL 下管道本就只授予创建者与本地访问）。
-fn harden_pipe_acl(server: &NamedPipeServer) {
-    use std::os::windows::io::AsRawHandle;
-
-    use windows::Win32::Foundation::{LocalFree, HANDLE, HLOCAL};
+/// 旧实现通过 `SetKernelObjectSecurity` 事后改 DACL 在服务进程里 0x80070005 失败：
+/// 命名管道的 server 句柄默认不带 WRITE_DAC，且同进程内拿不到带 WRITE_DAC 的句柄。
+/// 正确做法是 `CreateNamedPipeW` 时通过 `lpSecurityAttributes` 直接传预构建的 SA + SD。
+///
+/// 内存管理：
+/// - SD 由 `ConvertStringSecurityDescriptorToSecurityDescriptorW` 分配（LocalAlloc），
+///   进程内泄漏（不 LocalFree），覆盖所有后续 CreateNamedPipeW 调用即可。
+/// - SA 放在泄漏的 `Box` 里（`'static`），指针稳定可重复使用。
+fn build_pipe_security_attributes() -> windows::core::Result<*mut core::ffi::c_void> {
+    use std::sync::OnceLock;
+    use windows::core::PCWSTR;
     use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-    use windows::Win32::Security::{
-        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-    };
+    use windows::Win32::Security::SECURITY_ATTRIBUTES;
 
     const SDDL_REVISION_1: u32 = 1;
     // D: DACL, P: 无继承, A: 允许; GA: GENERIC_ALL
     // SY=SYSTEM, BA=Administrators, AU=Authenticated Users
     const SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)";
 
-    unsafe {
-        // UTF-16 编码 SDDL 字符串（PCWSTR 要求宽字符）。
-        let sddl_w: Vec<u16> = SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+    static SA_PTR: OnceLock<usize> = OnceLock::new();
 
+    if let Some(&raw) = SA_PTR.get() {
+        return Ok(raw as *mut core::ffi::c_void);
+    }
+
+    unsafe {
+        let sddl_w: Vec<u16> = SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sd = windows::Win32::Security::PSECURITY_DESCRIPTOR(std::ptr::null_mut());
         let mut sd_len = 0u32;
-        let mut sd = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
-        if let Err(e) = ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            windows::core::PCWSTR(sddl_w.as_ptr()),
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl_w.as_ptr()),
             SDDL_REVISION_1,
             &mut sd,
             Some(&mut sd_len),
-        ) {
-            warn!("转换管道 SDDL 失败，跳过 ACL 加固: {e}");
-            return;
-        }
+        )?;
 
-        // 从 SD 中取 DACL（确认 SDDL 转换产物确实包含 DACL）。
-        let mut has_dacl = false.into();
-        let mut dacl_ptr: *mut windows::Win32::Security::ACL = std::ptr::null_mut();
-        if let Err(e) =
-            GetSecurityDescriptorDacl(sd, &mut has_dacl, &mut dacl_ptr, &mut false.into())
-        {
-            warn!("读取 SD 的 DACL 失败，跳过 ACL 加固: {e}");
-            let _ = LocalFree(Some(HLOCAL(sd.0)));
-            return;
-        }
-        if !has_dacl.as_bool() || dacl_ptr.is_null() {
-            warn!("SDDL 转换产物无 DACL，跳过 ACL 加固");
-            let _ = LocalFree(Some(HLOCAL(sd.0)));
-            return;
-        }
+        // SA 泄漏：Box 永驻进程，其内部 lpSecurityDescriptor 指向 SD 也跟着常驻。
+        let sa_box: &'static mut SECURITY_ATTRIBUTES = Box::leak(Box::new(SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd.0,
+            bInheritHandle: windows::core::BOOL(0),
+        }));
+        let raw = sa_box as *mut SECURITY_ATTRIBUTES as usize;
+        let _ = sd_len;
+        let _ = SA_PTR.set(raw);
+        Ok(raw as *mut core::ffi::c_void)
+    }
+}
 
-        // 把新 DACL 应用到管道内核对象：传入整个 SD，仅施加 DACL_SECURITY_INFORMATION。
-        let hd = HANDLE(server.as_raw_handle());
-        let set =
-            windows::Win32::Security::SetKernelObjectSecurity(hd, DACL_SECURITY_INFORMATION, sd);
-        if let Err(e) = set {
-            warn!("设置管道 DACL 失败: {e}");
-        } else {
-            debug!("pipe DACL hardened (SYSTEM/Administrators/AuthUsers)");
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::core::PWSTR;
+    use windows::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+    use windows::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+
+    /// 回归测试：build_pipe_security_attributes 构建的 SA 必须包含可让 Authenticated
+    /// Users 访问的 ACE。之前 SetKernelObjectSecurity 路径会 0x80070005 失败，管道
+    /// 退回默认 DACL，UI 用户连不上核心，导致配置和网卡列表永远拿不到（下拉框空）。
+    /// 修复后通过 CreateNamedPipeW 时的 lpSecurityAttributes 直接挂上正确 DACL。
+    /// 这里把 SA 里的 SD 反向转回 SDDL 字符串，断言必须包含 "AU"。
+    #[test]
+    fn pipe_security_attributes_grants_authenticated_users() {
+        let sa_raw = build_pipe_security_attributes().expect("SA build ok");
+        // SAFETY: 这是我们刚刚泄漏的 SA，进程内单例，可读。
+        let sa = unsafe { &*(sa_raw as *const windows::Win32::Security::SECURITY_ATTRIBUTES) };
+        assert!(!sa.lpSecurityDescriptor.is_null(), "SD must not be null");
+
+        // 把 SD 转回 SDDL 字符串验证 DACL。
+        let mut sddl_out = PWSTR(std::ptr::null_mut());
+        let mut sddl_len: u32 = 0;
+        // SAFETY: 传入有效 SD 指针 + 输出 buffer。
+        let conv_ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                PSECURITY_DESCRIPTOR(sa.lpSecurityDescriptor),
+                1, // SDDL_REVISION_1
+                OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut sddl_out,
+                Some(&mut sddl_len),
+            )
         }
-        let _ = LocalFree(Some(HLOCAL(sd.0)));
+        .is_ok();
+        assert!(
+            conv_ok,
+            "ConvertSecurityDescriptorToStringSecurityDescriptorW failed"
+        );
+        // SAFETY: 成功返回的 PWSTR 由 LocalAlloc 分配，转成字符串读。
+        let sddl = unsafe {
+            let slice = std::slice::from_raw_parts(sddl_out.0, sddl_len as usize);
+            String::from_utf16_lossy(slice)
+        };
+        // 释放（LocalFree）。
+        // SAFETY: 函数返回的 PWSTR 需用 LocalFree，按 *mut c_void 传入。
+        unsafe {
+            let _ = windows::Win32::Foundation::LocalFree(Some(
+                windows::Win32::Foundation::HLOCAL(sddl_out.0 as *mut std::ffi::c_void),
+            ));
+        }
+        assert!(
+            sddl.contains("AU"),
+            "DACL must contain Authenticated Users (AU), got: {sddl}"
+        );
+        // 顺手也确认 SYSTEM / Administrators 都在。
+        assert!(sddl.contains("SY"), "DACL must contain SYSTEM, got: {sddl}");
+        assert!(
+            sddl.contains("BA"),
+            "DACL must contain Administrators, got: {sddl}"
+        );
     }
 }

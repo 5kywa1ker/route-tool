@@ -412,13 +412,17 @@ fn main() -> anyhow::Result<()> {
                             let mut st = state.lock().await;
                             match ipc_client::IpcClient::connect().await {
                                 Ok(mut c) => {
+                                    tracing::info!("重连核心成功");
                                     let status_ok = c.get_status().await.ok();
                                     let cfg_ok = c.get_config().await.ok();
                                     let adapters_ok = c.list_adapters().await.ok();
                                     st.client = Some(c);
                                     (true, status_ok, cfg_ok, adapters_ok)
                                 }
-                                Err(_) => (false, None, None, None),
+                                Err(e) => {
+                                    tracing::warn!("重连失败: {e:?}");
+                                    (false, None, None, None)
+                                }
                             }
                         };
                         // 重连成功后同步一次 UI（否则界面停在“未连接”）。握手
