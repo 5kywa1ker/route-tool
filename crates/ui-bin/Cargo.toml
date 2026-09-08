@@ -1,0 +1,30 @@
+[package]
+name = "ui-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bypass-ui"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+chrono = { workspace = true }
+slint = "1.14"
+tao = "0.34"
+tray-icon = "0.21"
+windows = { workspace = true }
+
+ipc-protocol = { path = "../ipc-protocol" }
+core-lib = { path = "../core-lib" }
+
+[build-dependencies]
+slint-build = "1.14"

@@ -1,0 +1,154 @@
+//! 系统托盘：状态图标 + 右键菜单。
+//!
+//! TrayIcon 只能在创建线程（UI 线程）上使用；跨线程更新通过
+//! `SHARED_TRAY` 静态句柄 + `invoke_from_event_loop` 实现。
+
+use std::sync::OnceLock;
+
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+
+/// 托盘菜单动作（poll_event 返回）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayAction {
+    Toggle,
+    OpenLogs,
+    Quit,
+}
+
+/// 托盘状态色。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayState {
+    /// 直连（灰）。
+    Direct,
+    /// 旁路由生效（绿）。
+    Bypass,
+    /// 异常已回退（红）。
+    Fallback,
+}
+
+/// 系统托盘。
+pub struct Tray {
+    _tray: TrayIcon,
+    toggle_id: tray_icon::menu::MenuId,
+    logs_id: tray_icon::menu::MenuId,
+    quit_id: tray_icon::menu::MenuId,
+}
+
+/// 全局托盘句柄：Tray 创建时注册。
+///
+/// TrayIcon 非 Send/Sync（内部含 Rc），静态存放需要 wrapper。
+/// 所有调用方必须通过 `invoke_from_event_loop` 在 UI 线程上访问。
+pub struct StaticTray(pub Tray);
+
+// Safety: TrayIcon 持有的 HWND/菜单句柄只在创建线程（UI 线程）上被触碰；
+// 本程序保证所有对 StaticTray 的访问都发生在 UI 线程（invoke_from_event_loop）。
+unsafe impl Send for StaticTray {}
+unsafe impl Sync for StaticTray {}
+
+impl StaticTray {
+    pub fn poll_event(&self) -> Option<TrayAction> {
+        self.0.poll_event()
+    }
+
+    pub fn update_state(&self, state: TrayState) {
+        self.0.update_state(state)
+    }
+}
+
+pub static SHARED_TRAY: OnceLock<StaticTray> = OnceLock::new();
+
+impl Tray {
+    pub fn new() -> anyhow::Result<Self> {
+        let toggle_item = MenuItem::new("启用旁路由", true, None);
+        let settings_item = MenuItem::new("打开设置", true, None);
+        let logs_item = MenuItem::new("查看日志", true, None);
+        let quit_item = MenuItem::new("退出", true, None);
+
+        let toggle_id = toggle_item.id().clone();
+        let logs_id = logs_item.id().clone();
+        let quit_id = quit_item.id().clone();
+
+        let menu = Menu::new();
+        menu.append_items(&[
+            &toggle_item,
+            &PredefinedMenuItem::separator(),
+            &settings_item,
+            &logs_item,
+            &PredefinedMenuItem::separator(),
+            &quit_item,
+        ])?;
+
+        let icon = make_icon(TrayState::Direct)?;
+
+        let tray = TrayIconBuilder::new()
+            .with_id("bypass-ui-tray")
+            .with_icon(icon)
+            .with_tooltip("旁路由切换工具 - 直连")
+            .with_menu(Box::new(menu))
+            .with_menu_on_left_click(true)
+            .build()?;
+
+        Ok(Self {
+            _tray: tray,
+            toggle_id,
+            logs_id,
+            quit_id,
+        })
+    }
+
+    /// 轮询菜单事件（MenuEvent 是全局通道，在 UI 事件循环里调用）。
+    pub fn poll_event(&self) -> Option<TrayAction> {
+        let receiver = MenuEvent::receiver();
+        if let Ok(ev) = receiver.try_recv() {
+            if ev.id == self.toggle_id {
+                return Some(TrayAction::Toggle);
+            } else if ev.id == self.logs_id {
+                return Some(TrayAction::OpenLogs);
+            } else if ev.id == self.quit_id {
+                return Some(TrayAction::Quit);
+            }
+        }
+        None
+    }
+
+    /// 更新托盘图标与提示文案（仅 UI 线程调用）。
+    pub fn update_state(&self, state: TrayState) {
+        let (icon, tip) = match state {
+            TrayState::Direct => (
+                make_icon(TrayState::Direct).ok(),
+                "旁路由切换工具 - 直连",
+            ),
+            TrayState::Bypass => (
+                make_icon(TrayState::Bypass).ok(),
+                "旁路由切换工具 - 旁路由生效",
+            ),
+            TrayState::Fallback => (
+                make_icon(TrayState::Fallback).ok(),
+                "旁路由切换工具 - 异常已自动回退",
+            ),
+        };
+        if let Some(icon) = icon {
+            let _ = self._tray.set_icon(Some(icon));
+        }
+        let _ = self._tray.set_tooltip(Some(tip));
+    }
+}
+
+/// 生成 32x32 纯色图标（灰 / 绿 / 红）。
+fn make_icon(state: TrayState) -> anyhow::Result<Icon> {
+    let (r, g, b) = match state {
+        TrayState::Direct => (0x9Eu8, 0x9Eu8, 0x9Eu8),
+        TrayState::Bypass => (0x2Eu8, 0xE7u8, 0x4Bu8),
+        TrayState::Fallback => (0xE5u8, 0x39u8, 0x35u8),
+    };
+    let size = 32usize;
+    let mut rgba = Vec::with_capacity(size * size * 4);
+    for _ in 0..(size * size) {
+        rgba.push(r);
+        rgba.push(g);
+        rgba.push(b);
+        rgba.push(255);
+    }
+    Ok(Icon::from_rgba(rgba, size as u32, size as u32)?)
+}

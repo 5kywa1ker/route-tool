@@ -1,0 +1,157 @@
+// 首次配置向导 + 状态面板（单窗口简化实现）。
+
+import { Button, ComboBox, LineEdit, SpinBox, CheckBox, GroupBox, GridBox } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "旁路由切换工具";
+    preferred-width: 480px;
+    preferred-height: 560px;
+
+    in property <string> status-text: "未连接到核心服务";
+    in property <bool> is-enabled: false;
+    in property <bool> is-fallback: false;
+    in property <[string]> adapter-names: [];
+    in property <int> adapter-index: -1;
+    in property <string> bypass-ip-text: "";
+    in property <int> mode-index: 0;         // 0=路由叠加 1=网卡直改
+    in property <int> interval-secs: 5;
+    in property <int> failure-threshold: 3;
+    in property <bool> auto-reenable: false;
+    in property <bool> notifications: true;
+    in property <string> test-result: "";
+    in property <string> config-error: "";
+    in property <bool> has-config: false;
+
+    callback toggle-bypass();
+    callback test-connectivity();
+    callback save-config();
+    callback open-logs();
+    callback adapter-changed(int);
+    callback mode-changed(int);
+    callback bypass-ip-edited(string);
+    callback interval-changed(int);
+    callback threshold-changed(int);
+    callback auto-reenable-changed(bool);
+    callback notifications-changed(bool);
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        GroupBox {
+            title: "状态";
+            VerticalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.status-text;
+                    font-size: 14px;
+                    color: root.is-fallback ? #d32f2f : (root.is-enabled ? #2e7d32 : #757575);
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: root.is-enabled ? "禁用旁路由" : "启用旁路由";
+                        primary: true;
+                        clicked => { root.toggle-bypass(); }
+                    }
+                    Button {
+                        text: "测试连通性";
+                        clicked => { root.test-connectivity(); }
+                    }
+                }
+                Text {
+                    text: root.test-result;
+                    font-size: 12px;
+                    color: #555;
+                }
+            }
+        }
+
+        GroupBox {
+            title: "配置";
+            GridBox {
+                spacing: 8px;
+                Row {
+                    Text { text: "网卡:"; vertical-alignment: center; }
+                    ComboBox {
+                        model: root.adapter-names;
+                        current-index: root.adapter-index;
+                        selected => { root.adapter-changed(self.current-index); }
+                    }
+                }
+                Row {
+                    Text { text: "旁路由 IP:"; vertical-alignment: center; }
+                    LineEdit {
+                        text: root.bypass-ip-text;
+                        edited(t) => { root.bypass-ip-edited(t); }
+                        placeholder-text: "例如 192.168.2.1";
+                    }
+                }
+                Row {
+                    Text { text: "切换模式:"; vertical-alignment: center; }
+                    ComboBox {
+                        model: ["路由叠加（推荐）", "网卡直改"];
+                        current-index: root.mode-index;
+                        selected => { root.mode-changed(self.current-index); }
+                    }
+                }
+                Row {
+                    Text { text: "检测间隔(秒):"; vertical-alignment: center; }
+                    SpinBox {
+                        minimum: 1;
+                        maximum: 60;
+                        value: root.interval-secs;
+                        changed value => { root.interval-changed(self.value); }
+                    }
+                }
+                Row {
+                    Text { text: "失败阈值:"; vertical-alignment: center; }
+                    SpinBox {
+                        minimum: 1;
+                        maximum: 10;
+                        value: root.failure-threshold;
+                        changed value => { root.threshold-changed(self.value); }
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: 4px;
+                CheckBox {
+                    text: "旁路由恢复后自动重新启用";
+                    checked: root.auto-reenable;
+                    toggled => { root.auto-reenable-changed(self.checked); }
+                }
+                CheckBox {
+                    text: "启用系统通知";
+                    checked: root.notifications;
+                    toggled => { root.notifications-changed(self.checked); }
+                }
+            }
+        }
+
+        Text {
+            text: root.config-error;
+            font-size: 12px;
+            color: #d32f2f;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: "保存配置";
+                clicked => { root.save-config(); }
+            }
+            Button {
+                text: "打开日志目录";
+                clicked => { root.open-logs(); }
+            }
+        }
+
+        Text {
+            text: "说明：路由叠加 = 仅添加一条高优先级默认路由，不动网卡配置；\n网卡直改 = 直接修改网卡的网关/DNS，需备份恢复，风险略高。";
+            font-size: 11px;
+            color: #888;
+            wrap: word-wrap;
+        }
+    }
+}

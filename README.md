@@ -268,3 +268,50 @@ bypass-tool/
 - 应用内自动更新
 
 ---
+
+## 12. 实现状态（2026-09-07）
+
+### 12.1 已完成
+
+| 范围 | 说明 |
+|---|---|
+| workspace 结构 | 5 crates：`ipc-protocol` / `core-lib` / `core-win` / `core-bin` / `ui-bin` |
+| IPC 协议 | 行分隔 JSON-RPC 2.0，管道 `\\.\pipe\BypassToolCore`，支持 GetStatus / GetConfig / UpdateConfig / EnableBypass / DisableBypass / TestConnectivity / ListAdapters / SubscribeEvents（事件推送） |
+| RouteOverlay 策略 | `CreateIpForwardEntry2`/`DeleteIpForwardEntry2` 添加/删除 0.0.0.0/0 via bypass_ip（metric 5），`is_active` 基于路由表+接口状态 |
+| AdapterReconfig 策略 | netsh 静态 IP/网关/DNS 切换；启用前快照备份（`adapter_snapshot.json`），禁用时恢复（DHCP 或原静态参数） |
+| 健康检测 | 定时 ICMP ping bypass_ip，连续失败达阈值 → 自动回退（禁用策略/恢复快照）+ `AutoFallbackTriggered` 事件；可选"恢复后自动重新启用"；健康巡检中自动校验路由仍生效（睡眠唤醒/网卡切换自愈） |
+| 启动一致性校验 | `reconcile_on_startup`：路由叠加模式校验路由表，直改模式校验网关/快照，无快照时安全回退直连 |
+| Windows 服务 | `bypass-core --install-service` / `--uninstall-service`，SCM 管理自启，`--console` 调试模式 |
+| 持久化 | `%ProgramData%\BypassTool\{config,runtime_state,adapter_snapshot}.json`，临时文件+fsync+原子 rename，损坏文件按默认值容错 |
+| 日志 | tracing + tracing-appender 按天滚动（`%ProgramData%\BypassTool\logs\`；UI 日志在 `%TEMP%\BypassTool\`） |
+| UI | 托盘（灰/绿/红三态图标 + 右键菜单 + 悬浮提示）、Slint 设置窗口、Toast 通知（回退时）、1s 状态轮询 |
+| 安装包 | `installer/BypassTool.iss`（Inno Setup，含服务注册/启动/开机自启 UI 可选项） |
+| CI/CD | `.github/workflows/release.yml`：push tag `v*` → 构建 → 测试 → iscc 打包 → GitHub Release |
+| 测试 | `cargo test --workspace`：协议序列化往返、状态存储原子写/容错、健康检测状态机（降级/回退/自动重启用/Idle）19 项单测 |
+| 代码质量 | `cargo clippy --workspace --all-targets` 零警告 |
+
+### 12.2 已知限制（与 §11 对应）
+
+- **仅支持 IPv4**：路由叠加只处理 `0.0.0.0/0`（AF_INET），网卡直改只设置 IPv4 静态地址与 IPv4 DNS；IPv6 路由与 DNS（含 RA/DHCPv6）不受管理。启用旁路由后 IPv6 流量仍按系统原路由行走，不会经旁路由。
+- **AdapterReconfig 模式使用 netsh**：需求文档 §2 建议的 `CreateUnicastIpAddressEntry`/`SetInterfaceDnsSettings` 纯 API 方案，因 DHCP 开关与静态网关设置需额外操作 WMI/注册表，MVP 采用系统自带 netsh（SYSTEM 权限可用）；后续可替换 `core-win/src/netsh.rs`。
+- 子网掩码快照恢复固定按 /24 处理（`adapter_snapshot.json` 中 `static_ipv4_mask` 预留了扩展位）。
+- 首次配置向导目前为单窗口简化实现（网卡列表懒加载、DNS 自定义输入待补）。
+- "恢复出厂网络设置"兜底小工具（Phase 3 验收项）尚未单独提供。
+
+### 12.3 本地构建与运行
+
+```powershell
+$env:Path = "$env:USERPROFILE\.cargo\bin;" + $env:Path
+cargo build
+# 调试运行 core（控制台模式，不需装服务）
+.\target\debug\bypass-core.exe --console
+# 另一终端运行 UI
+.\target\debug\bypass-ui.exe
+```
+
+服务模式（管理员 PowerShell）：
+
+```powershell
+.\target\release\bypass-core.exe --install-service
+net start BypassToolCore
+```
