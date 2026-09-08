@@ -6,8 +6,10 @@ export component AppWindow inherits Window {
     title: "RouteTool";
     // 标题栏 / 任务栏窗口图标（winit 后端会从这里取）。
     icon: @image-url("../../../assets/app.png");
-    preferred-width: 480px;
-    preferred-height: 560px;
+    preferred-width: 460px;
+    preferred-height: 470px;
+    min-width: 420px;
+    min-height: 420px;
 
     // 用户可编辑的控件属性一律用 in-out + 双向绑定（<=>）：
     // 单向绑定会让 Rust 侧属性与控件实际状态失同步（选择/输入回退、读到旧值）。
@@ -33,16 +35,16 @@ export component AppWindow inherits Window {
     callback adapter-changed(int);
 
     VerticalLayout {
-        padding: 16px;
-        spacing: 12px;
+        padding: 12px;
+        spacing: 8px;
 
         GroupBox {
             title: "状态";
             VerticalLayout {
-                spacing: 8px;
+                spacing: 6px;
                 Text {
                     text: root.status-text;
-                    font-size: 14px;
+                    font-size: 13px;
                     color: root.is-fallback ? #d32f2f : (root.is-enabled ? #2e7d32 : #757575);
                 }
                 HorizontalLayout {
@@ -57,9 +59,9 @@ export component AppWindow inherits Window {
                         clicked => { root.test-connectivity(); }
                     }
                 }
-                Text {
+                if root.test-result != "": Text {
                     text: root.test-result;
-                    font-size: 12px;
+                    font-size: 11px;
                     color: #555;
                 }
             }
@@ -67,63 +69,66 @@ export component AppWindow inherits Window {
 
         GroupBox {
             title: "配置";
-            GridBox {
-                spacing: 8px;
-                Row {
-                    Text { text: "网卡:"; vertical-alignment: center; }
-                    ComboBox {
-                        model: root.adapter-names;
-                        current-index <=> root.adapter-index;
-                        selected => { root.adapter-changed(self.current-index); }
-                    }
-                }
-                Row {
-                    Text { text: "旁路由 IP:"; vertical-alignment: center; }
-                    LineEdit {
-                        text <=> root.bypass-ip-text;
-                        placeholder-text: "例如 192.168.2.1";
-                    }
-                }
-                Row {
-                    Text { text: "切换模式:"; vertical-alignment: center; }
-                    ComboBox {
-                        model: ["路由叠加（推荐）", "网卡直改"];
-                        current-index <=> root.mode-index;
-                    }
-                }
-                Row {
-                    Text { text: "检测间隔(秒):"; vertical-alignment: center; }
-                    SpinBox {
-                        minimum: 1;
-                        maximum: 60;
-                        value <=> root.interval-secs;
-                    }
-                }
-                Row {
-                    Text { text: "失败阈值:"; vertical-alignment: center; }
-                    SpinBox {
-                        minimum: 1;
-                        maximum: 10;
-                        value <=> root.failure-threshold;
-                    }
-                }
-            }
             VerticalLayout {
-                spacing: 4px;
-                CheckBox {
-                    text: "旁路由恢复后自动重新启用";
-                    checked <=> root.auto-reenable;
+                spacing: 6px;
+                GridBox {
+                    spacing: 6px;
+                    Row {
+                        Text { text: "网卡:"; vertical-alignment: center; }
+                        ComboBox {
+                            model: root.adapter-names;
+                            current-index <=> root.adapter-index;
+                            selected => { root.adapter-changed(self.current-index); }
+                        }
+                    }
+                    Row {
+                        Text { text: "旁路由 IP:"; vertical-alignment: center; }
+                        LineEdit {
+                            text <=> root.bypass-ip-text;
+                            placeholder-text: "例如 192.168.2.1";
+                        }
+                    }
+                    Row {
+                        Text { text: "切换模式:"; vertical-alignment: center; }
+                        ComboBox {
+                            model: ["路由叠加（推荐）", "网卡直改"];
+                            current-index <=> root.mode-index;
+                        }
+                    }
+                    Row {
+                        Text { text: "检测间隔(秒):"; vertical-alignment: center; }
+                        SpinBox {
+                            minimum: 1;
+                            maximum: 60;
+                            value <=> root.interval-secs;
+                        }
+                    }
+                    Row {
+                        Text { text: "失败阈值:"; vertical-alignment: center; }
+                        SpinBox {
+                            minimum: 1;
+                            maximum: 10;
+                            value <=> root.failure-threshold;
+                        }
+                    }
                 }
-                CheckBox {
-                    text: "启用系统通知";
-                    checked <=> root.notifications;
+                VerticalLayout {
+                    spacing: 2px;
+                    CheckBox {
+                        text: "旁路由恢复后自动重新启用";
+                        checked <=> root.auto-reenable;
+                    }
+                    CheckBox {
+                        text: "启用系统通知";
+                        checked <=> root.notifications;
+                    }
                 }
             }
         }
 
-        Text {
+        if root.config-error != "": Text {
             text: root.config-error;
-            font-size: 12px;
+            font-size: 11px;
             color: #d32f2f;
         }
 
@@ -141,7 +146,7 @@ export component AppWindow inherits Window {
 
         Text {
             text: "说明：路由叠加 = 添加 0.0.0.0/1 + 128.0.0.0/1 两条路由覆盖默认路由，不动网卡配置；\n网卡直改 = 直接修改网卡的网关/DNS，需备份恢复，风险略高。";
-            font-size: 11px;
+            font-size: 10px;
             color: #888;
             wrap: word-wrap;
         }
