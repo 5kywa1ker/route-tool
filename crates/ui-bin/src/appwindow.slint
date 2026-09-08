@@ -9,17 +9,19 @@ export component AppWindow inherits Window {
     preferred-width: 480px;
     preferred-height: 560px;
 
+    // 用户可编辑的控件属性一律用 in-out + 双向绑定（<=>）：
+    // 单向绑定会让 Rust 侧属性与控件实际状态失同步（选择/输入回退、读到旧值）。
     in property <string> status-text: "未连接到核心服务";
     in property <bool> is-enabled: false;
     in property <bool> is-fallback: false;
     in property <[string]> adapter-names: [];
-    in property <int> adapter-index: -1;
-    in property <string> bypass-ip-text: "";
-    in property <int> mode-index: 0;         // 0=路由叠加 1=网卡直改
-    in property <int> interval-secs: 5;
-    in property <int> failure-threshold: 3;
-    in property <bool> auto-reenable: false;
-    in property <bool> notifications: true;
+    in-out property <int> adapter-index: -1;
+    in-out property <string> bypass-ip-text: "";
+    in-out property <int> mode-index: 0;         // 0=路由叠加 1=网卡直改
+    in-out property <int> interval-secs: 5;
+    in-out property <int> failure-threshold: 3;
+    in-out property <bool> auto-reenable: false;
+    in-out property <bool> notifications: true;
     in property <string> test-result: "";
     in property <string> config-error: "";
     in property <bool> has-config: false;
@@ -29,12 +31,6 @@ export component AppWindow inherits Window {
     callback save-config();
     callback open-logs();
     callback adapter-changed(int);
-    callback mode-changed(int);
-    callback bypass-ip-edited(string);
-    callback interval-changed(int);
-    callback threshold-changed(int);
-    callback auto-reenable-changed(bool);
-    callback notifications-changed(bool);
 
     VerticalLayout {
         padding: 16px;
@@ -77,15 +73,14 @@ export component AppWindow inherits Window {
                     Text { text: "网卡:"; vertical-alignment: center; }
                     ComboBox {
                         model: root.adapter-names;
-                        current-index: root.adapter-index;
+                        current-index <=> root.adapter-index;
                         selected => { root.adapter-changed(self.current-index); }
                     }
                 }
                 Row {
                     Text { text: "旁路由 IP:"; vertical-alignment: center; }
                     LineEdit {
-                        text: root.bypass-ip-text;
-                        edited(t) => { root.bypass-ip-edited(t); }
+                        text <=> root.bypass-ip-text;
                         placeholder-text: "例如 192.168.2.1";
                     }
                 }
@@ -93,8 +88,7 @@ export component AppWindow inherits Window {
                     Text { text: "切换模式:"; vertical-alignment: center; }
                     ComboBox {
                         model: ["路由叠加（推荐）", "网卡直改"];
-                        current-index: root.mode-index;
-                        selected => { root.mode-changed(self.current-index); }
+                        current-index <=> root.mode-index;
                     }
                 }
                 Row {
@@ -102,8 +96,7 @@ export component AppWindow inherits Window {
                     SpinBox {
                         minimum: 1;
                         maximum: 60;
-                        value: root.interval-secs;
-                        changed value => { root.interval-changed(self.value); }
+                        value <=> root.interval-secs;
                     }
                 }
                 Row {
@@ -111,8 +104,7 @@ export component AppWindow inherits Window {
                     SpinBox {
                         minimum: 1;
                         maximum: 10;
-                        value: root.failure-threshold;
-                        changed value => { root.threshold-changed(self.value); }
+                        value <=> root.failure-threshold;
                     }
                 }
             }
@@ -120,13 +112,11 @@ export component AppWindow inherits Window {
                 spacing: 4px;
                 CheckBox {
                     text: "旁路由恢复后自动重新启用";
-                    checked: root.auto-reenable;
-                    toggled => { root.auto-reenable-changed(self.checked); }
+                    checked <=> root.auto-reenable;
                 }
                 CheckBox {
                     text: "启用系统通知";
-                    checked: root.notifications;
-                    toggled => { root.notifications-changed(self.checked); }
+                    checked <=> root.notifications;
                 }
             }
         }

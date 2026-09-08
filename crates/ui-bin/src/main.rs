@@ -6,6 +6,7 @@
 
 mod ipc_client;
 mod notify;
+mod single_instance;
 mod tray;
 
 use std::rc::Rc;
@@ -28,16 +29,24 @@ struct UiState {
 }
 
 /// 拉取网卡列表并填充下拉框；同时按配置里的 adapter_id 选中对应项。
+///
+/// 注意：必须在 client 已连接后调用。启动阶段与连接任务并行调用会因竞态
+/// 拿到 None 而空手而归（下拉框一直为空 = "无法选择网卡"），所以启动流程
+/// 已改为串行（连接 → 配置 → 网卡），本函数只用于轮询里的自愈补拉。
 async fn refresh_adapters(state: Arc<Mutex<UiState>>, app_weak: slint::Weak<AppWindow>) {
     let (cfg_id, result) = {
         let mut st = state.lock().await;
-        let Some(c) = st.client.as_mut() else {
-            return;
+        let cfg_id = st.config.adapter_id.clone();
+        let result = match st.client.as_mut() {
+            Some(c) => c.list_adapters().await,
+            None => return,
         };
-        let r = c.list_adapters().await;
-        (st.config.adapter_id.clone(), r)
+        (cfg_id, result)
     };
     let Ok(list) = result else { return };
+    if list.is_empty() {
+        return;
+    }
 
     let sel = list.iter().position(|a| a.id == cfg_id);
     let names: Vec<SharedString> = list.iter().map(|a| a.name.clone().into()).collect();
@@ -76,6 +85,13 @@ fn init_logging() {
 fn main() -> anyhow::Result<()> {
     init_logging();
 
+    // 单实例：已有 bypass-ui 在跑时直接退出（并通知其弹出设置窗口），
+    // 否则双击桌面图标会再起一个进程、托盘上多出一个图标。
+    let _single_instance = match single_instance::acquire_or_notify()? {
+        Some(guard) => guard,
+        None => return Ok(()),
+    };
+
     let rt = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -101,26 +117,63 @@ fn main() -> anyhow::Result<()> {
     let tray = tray::Tray::new()?;
     let _ = tray::SHARED_TRAY.set(tray::StaticTray(tray));
 
-    // ---- 连接核心：拉配置 + 状态 ----
+    // ---- 连接核心：串行完成 连接 → 拉配置 → 拉网卡列表，一次性同步 UI ----
+    //
+    // 不能拆成并行的两个任务：拉网卡的分支抢锁时若 client 尚未就绪就会直接
+    // 返回，而轮询的健康路径不会再补拉，网卡下拉框将永远是空的。
+    // 连接失败（服务未就绪）时重试一段时间；彻底失败则交给 1s 轮询的重连逻辑。
     {
         let state = state.clone();
         let app_weak = app.as_weak();
         let rt = rt.clone();
         rt.spawn(async move {
-            let client = ipc_client::IpcClient::connect().await.ok();
-            let cfg_opt = {
+            let mut client = None;
+            for _ in 0..10 {
+                match ipc_client::IpcClient::connect().await {
+                    Ok(c) => {
+                        client = Some(c);
+                        break;
+                    }
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+                }
+            }
+            let Some(mut client) = client else {
+                tracing::warn!("启动时未能连接核心服务，等待轮询重连");
+                return;
+            };
+
+            let cfg = client.get_config().await.ok();
+            let adapters = client.list_adapters().await.ok();
+
+            let (cfg_id, adapter_names, adapter_idx) = {
                 let mut st = state.lock().await;
-                st.client = client;
-                match st.client.as_mut() {
-                    Some(c) => c.get_config().await.ok(),
-                    None => None,
+                st.client = Some(client);
+                let cfg_id = match &cfg {
+                    Some(c) => {
+                        st.config = c.clone();
+                        c.adapter_id.clone()
+                    }
+                    None => st.config.adapter_id.clone(),
+                };
+                match &adapters {
+                    Some(list) => {
+                        let sel = list.iter().position(|a| a.id == cfg_id);
+                        let names: Vec<SharedString> =
+                            list.iter().map(|a| a.name.clone().into()).collect();
+                        st.adapters = list.clone();
+                        (
+                            Some(cfg_id),
+                            Some(names),
+                            sel.map(|i| i as i32).unwrap_or(-1),
+                        )
+                    }
+                    None => (None, None, -1),
                 }
             };
-            if let Some(cfg) = cfg_opt {
-                state.lock().await.config = cfg.clone();
-                let app_weak = app_weak.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(app) = app_weak.upgrade() {
+
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = app_weak.upgrade() {
+                    if let Some(cfg) = cfg {
                         app.set_bypass_ip_text(cfg.bypass_ip.to_string().into());
                         app.set_mode_index(match cfg.switch_mode {
                             SwitchMode::RouteOverlay => 0,
@@ -132,18 +185,14 @@ fn main() -> anyhow::Result<()> {
                         app.set_notifications(cfg.notifications_enabled);
                         app.set_has_config(true);
                     }
-                });
-            }
-        });
-    }
-
-    // ---- 连接核心后填充网卡下拉框（委托给公共函数，失败静默——轮询任务也会重试）----
-    {
-        let state = state.clone();
-        let app_weak = app.as_weak();
-        let rt = rt.clone();
-        rt.spawn(async move {
-            refresh_adapters(state, app_weak).await;
+                    if let Some(names) = adapter_names {
+                        app.set_adapter_names(ModelRc::from(Rc::new(VecModel::from(names))));
+                        app.set_adapter_index(adapter_idx);
+                    }
+                }
+            });
+            // cfg_id 当前仅用于填充选中项；消除未使用告警（保留变量便于后续扩展）。
+            let _ = cfg_id;
         });
     }
 
@@ -432,6 +481,15 @@ fn main() -> anyhow::Result<()> {
                     }
                     let Some(rs) = snapshot else { return };
 
+                    // 网卡列表尚未就绪时补拉一次（自愈启动竞态/首次连接失败）。
+                    let need_adapter_refresh = {
+                        let st = state.lock().await;
+                        st.adapters.is_empty()
+                    };
+                    if need_adapter_refresh {
+                        refresh_adapters(state.clone(), app_weak.clone()).await;
+                    }
+
                     let (txt, tray_state, is_fb) = match &rs.health {
                         HealthStatus::Idle => {
                             ("直连（未启用）".to_string(), tray::TrayState::Direct, false)
@@ -490,33 +548,46 @@ fn main() -> anyhow::Result<()> {
         std::mem::forget(timer); // 保活
     }
 
-    // ---- 托盘菜单事件轮询（200ms）----
+    // ---- 托盘菜单事件 + 二次启动唤起 轮询（200ms）----
     {
         let app_weak = app.as_weak();
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(200),
-            move || match tray::SHARED_TRAY.get().and_then(|t| t.poll_event()) {
-                Some(tray::TrayAction::Toggle) => {
-                    if let Some(a) = app_weak.upgrade() {
-                        a.invoke_toggle_bypass();
-                    }
-                }
-                Some(tray::TrayAction::OpenSettings) => {
+            move || {
+                // 用户再次双击桌面图标 → 通知事件 → 弹出已有实例的设置窗口。
+                if single_instance::poll_show_request() {
                     if let Some(a) = app_weak.upgrade() {
                         a.window().show().ok();
                     }
                 }
-                Some(tray::TrayAction::OpenLogs) => {
-                    let _ = std::process::Command::new("explorer")
-                        .arg(r"C:\ProgramData\RouteTool\logs")
-                        .spawn();
+                match tray::SHARED_TRAY.get().and_then(|t| t.poll_event()) {
+                    Some(tray::TrayAction::Toggle) => {
+                        if let Some(a) = app_weak.upgrade() {
+                            a.invoke_toggle_bypass();
+                        }
+                    }
+                    Some(tray::TrayAction::OpenSettings) => {
+                        if let Some(a) = app_weak.upgrade() {
+                            a.window().show().ok();
+                        }
+                    }
+                    Some(tray::TrayAction::OpenLogs) => {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(r"C:\ProgramData\RouteTool\logs")
+                            .spawn();
+                    }
+                    Some(tray::TrayAction::Quit) => {
+                        // 先显式移除托盘图标再退出：进程结束后 Windows 会残留“幽灵图标”，
+                        // 看起来像没有退出干净。
+                        if let Some(t) = tray::SHARED_TRAY.get() {
+                            t.hide_icon();
+                        }
+                        slint::quit_event_loop().ok();
+                    }
+                    None => {}
                 }
-                Some(tray::TrayAction::Quit) => {
-                    slint::quit_event_loop().ok();
-                }
-                None => {}
             },
         );
         std::mem::forget(timer); // 保活
@@ -526,7 +597,9 @@ fn main() -> anyhow::Result<()> {
     // 托盘常驻：窗口隐藏/无可见 UI 也不退出事件循环，直到显式 quit。
     slint::run_event_loop_until_quit()?;
 
-    Ok(())
+    // 事件循环退出（托盘“退出”）后立即终止进程：不等任何残留句柄/后台任务，
+    // 确保任务管理器里不留 bypass-ui.exe。
+    std::process::exit(0);
 }
 
 /// 当前是否启用（从 UI 状态读）。

@@ -78,7 +78,12 @@ Filename: "sc"; Parameters: "start {#ServiceName}"; Flags: runhidden; StatusMsg:
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
+; 卸载顺序很关键：先杀 UI（否则托盘进程持有文件锁），再停服务，
+; 服务停不掉就强杀 core 进程（否则 exe 被锁、文件删不掉 = 卸载不干净），
+; 最后删除服务注册。
+Filename: "taskkill"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden; RunOnceId: "KillUI"
 Filename: "sc"; Parameters: "stop {#ServiceName}"; Flags: runhidden; RunOnceId: "StopSvc"
+Filename: "taskkill"; Parameters: "/F /IM {#CoreExeName}"; Flags: runhidden; RunOnceId: "KillCore"
 Filename: "{app}\{#CoreExeName}"; Parameters: "--uninstall-service"; Flags: runhidden; RunOnceId: "DelSvc"
 
 [UninstallDelete]
@@ -105,4 +110,31 @@ var
 begin
   Result := Exec('sc', 'query BypassToolCore', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
     and (ResultCode = 0);
+end;
+
+// 毫秒级等待（Inno 脚本内没有内置 Sleep，直接引入 kernel32 的）。
+procedure WaitMs(Ms: Integer); external 'Sleep@kernel32.dll stdcall';
+
+// 升级安装前先清场：正在运行的 bypass-ui 会锁住 exe 导致复制文件失败，
+// 服务没停就覆盖 bypass-core 同理。这里杀进程 + 停服务，失败不中断安装
+// （可能本来就没在运行）。sc stop 是异步的，等待服务真正停下来。
+procedure PrepareToInstallCleanup();
+var
+  ResultCode: Integer;
+begin
+  Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if ServiceExists() then
+  begin
+    Exec('sc', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // sc stop 返回不代表服务进程已退出，短暂等待避免覆盖文件时被占用。
+    WaitMs(2000);
+    // 兜底强杀（未在运行时 taskkill 只是返回错误，无副作用）。
+    Exec('taskkill', '/F /IM {#CoreExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  PrepareToInstallCleanup();
+  Result := '';
 end;

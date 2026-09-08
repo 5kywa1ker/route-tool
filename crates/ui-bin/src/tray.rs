@@ -56,6 +56,10 @@ impl StaticTray {
     pub fn update_state(&self, state: TrayState) {
         self.0.update_state(state)
     }
+
+    pub fn hide_icon(&self) {
+        self.0.hide_icon()
+    }
 }
 
 pub static SHARED_TRAY: OnceLock<StaticTray> = OnceLock::new();
@@ -118,14 +122,17 @@ impl Tray {
         None
     }
 
+    /// 移除托盘图标（退出前调用）。进程退出后 Windows 不会立刻清理图标，
+    /// 会残留“幽灵图标”直到鼠标划过，因此必须显式隐藏。
+    pub fn hide_icon(&self) {
+        let _ = self._tray.set_visible(false);
+    }
+
     /// 更新托盘图标与提示文案（仅 UI 线程调用）。
     pub fn update_state(&self, state: TrayState) {
         let (icon, tip) = match state {
             TrayState::Direct => (make_icon(TrayState::Direct).ok(), "RouteTool - 直连"),
-            TrayState::Bypass => (
-                make_icon(TrayState::Bypass).ok(),
-                "RouteTool - 旁路由生效",
-            ),
+            TrayState::Bypass => (make_icon(TrayState::Bypass).ok(), "RouteTool - 旁路由生效"),
             TrayState::Fallback => (
                 make_icon(TrayState::Fallback).ok(),
                 "RouteTool - 异常已自动回退",
@@ -155,5 +162,9 @@ fn tray_icon_bytes(state: TrayState) -> &'static [u8] {
 /// 生成 32x32 托盘图标（灰 / 绿 / 红三态）。
 fn make_icon(state: TrayState) -> anyhow::Result<Icon> {
     let rgba = tray_icon_bytes(state).to_vec();
-    Ok(Icon::from_rgba(rgba, TRAY_ICON_PX as u32, TRAY_ICON_PX as u32)?)
+    Ok(Icon::from_rgba(
+        rgba,
+        TRAY_ICON_PX as u32,
+        TRAY_ICON_PX as u32,
+    )?)
 }
