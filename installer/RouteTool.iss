@@ -49,8 +49,11 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 
 [Files]
-Source: "..\target\x86_64-pc-windows-msvc\release\bypass-core.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\x86_64-pc-windows-msvc\release\bypass-ui.exe"; DestDir: "{app}"; Flags: ignoreversion
+; ignoreversion: 总是覆盖（升级时替换旧 exe，不依赖版本比较）。
+; restartreplace: 若目标文件正被占用（如服务仍在运行锁住 bypass-core.exe），
+;   标记为"重启后替换"而不是静默跳过，避免升级后仍跑旧二进制。
+Source: "..\target\x86_64-pc-windows-msvc\release\bypass-core.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace
+Source: "..\target\x86_64-pc-windows-msvc\release\bypass-ui.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -112,6 +115,35 @@ begin
     and (ResultCode = 0);
 end;
 
+// 检测服务是否处于 RUNNING 状态（区别于 ServiceExists 只判断"已注册"）。
+// sc query 输出含 "RUNNING" 即运行中；把 stdout 重定向到临时文件再读取，
+// 因为 Inno 的 Exec 无法直接捕获子进程 stdout。
+function ServiceRunning(): Boolean;
+var
+  ResultCode: Integer;
+  TmpFile: string;
+  Lines: TArrayOfString;
+  I: Integer;
+begin
+  Result := False;
+  TmpFile := ExpandConstant('{tmp}\rt_svc_state.txt');
+  DeleteFile(TmpFile);
+  if not Exec('cmd.exe',
+    '/C sc query {#ServiceName} > "' + TmpFile + '" 2>&1',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Exit;
+  if not LoadStringsFromFile(TmpFile, Lines) then
+    Exit;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+  begin
+    if Pos('RUNNING', Uppercase(Lines[I])) > 0 then
+    begin
+      Result := True;
+      Break;
+    end;
+  end;
+end;
+
 // 毫秒级等待（Inno 脚本内没有内置 Sleep，直接引入 kernel32 的）。
 procedure WaitMs(Ms: Integer); external 'Sleep@kernel32.dll stdcall';
 
@@ -121,13 +153,21 @@ procedure WaitMs(Ms: Integer); external 'Sleep@kernel32.dll stdcall';
 procedure PrepareToInstallCleanup();
 var
   ResultCode: Integer;
+  I: Integer;
 begin
   Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ServiceExists() then
   begin
     Exec('sc', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    // sc stop 返回不代表服务进程已退出，短暂等待避免覆盖文件时被占用。
-    WaitMs(2000);
+    // sc stop 返回不代表服务进程已退出，且进程退出前 bypass-core.exe 仍被
+    // 文件锁占用，直接复制会失败或被跳过。这里轮询等待服务真正停下
+    // （最多 10 秒），而不是固定 sleep 2 秒，避免升级后仍残留旧二进制。
+    for I := 0 to 9 do
+    begin
+      if not ServiceRunning() then
+        Break;
+      WaitMs(1000);
+    end;
     // 兜底强杀（未在运行时 taskkill 只是返回错误，无副作用）。
     Exec('taskkill', '/F /IM {#CoreExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
