@@ -33,13 +33,13 @@ impl NetInspector for WinNetInspector {
         .map_err(|e| CoreError::Other(format!("任务失败: {e}")))?
     }
 
-    async fn ping(&self, ip: IpAddr, timeout_ms: u32) -> Result<bool> {
+    async fn ping(&self, ip: IpAddr, timeout_ms: u32) -> Result<Option<u32>> {
         match ip {
             IpAddr::V4(v4) => {
-                let ok = tokio::task::spawn_blocking(move || icmp::ping_ipv4(v4, timeout_ms))
+                let latency = tokio::task::spawn_blocking(move || icmp::ping_ipv4(v4, timeout_ms))
                     .await
                     .map_err(|e| CoreError::Other(format!("任务失败: {e}")))?;
-                Ok(ok)
+                Ok(latency)
             }
             IpAddr::V6(_) => Err(CoreError::Network("MVP 不支持 IPv6".into())),
         }

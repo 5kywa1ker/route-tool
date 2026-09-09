@@ -15,5 +15,6 @@ pub trait NetInspector: Send + Sync {
     async fn current_route_state(&self, adapter_id: &str) -> Result<RouteState>;
 
     /// 对给定 IP 做连通性探测（ICMP ping）。
-    async fn ping(&self, ip: IpAddr, timeout_ms: u32) -> Result<bool>;
+    /// 返回 `Ok(Some(latency_ms))` 表示可达并给出往返毫秒；`Ok(None)` 表示不可达或超时。
+    async fn ping(&self, ip: IpAddr, timeout_ms: u32) -> Result<Option<u32>>;
 }

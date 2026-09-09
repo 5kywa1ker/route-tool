@@ -220,7 +220,7 @@ async fn dispatch(state: &ServerState, req: &RpcRequest) -> RpcOutcome {
                     }
                 }
             };
-            let reachable = c.inspector().ping(ip, 3000).await.unwrap_or(false);
+            let reachable = c.inspector().ping(ip, 3000).await.unwrap_or(None).is_some();
             ok(&reachable)
         }
         method::LIST_ADAPTERS => match c.inspector().list_adapters().await {

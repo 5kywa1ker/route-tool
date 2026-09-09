@@ -16,12 +16,18 @@ use tokio::sync::Mutex;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use tracing_subscriber::EnvFilter;
 
-use ipc_protocol::{AppConfig, HealthStatus, SwitchMode};
+use ipc_protocol::{AdapterInfo, AppConfig, HealthStatus, SwitchMode};
 
 slint::include_modules!();
 
+/// 应用版本（来自 Cargo.toml）。
+const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+
 /// 直改模式子网掩码的默认值（用户未填时）。
 const DEFAULT_MASK: &str = "255.255.255.0";
+
+/// 日志目录。
+const CORE_LOG_DIR: &str = r"C:\ProgramData\RouteTool\logs";
 
 /// 解析 DNS 输入（逗号/分号/空白分隔），空输入返回 None。
 fn parse_dns_list(text: &str) -> Result<Option<Vec<std::net::IpAddr>>, String> {
@@ -42,11 +48,6 @@ fn parse_dns_list(text: &str) -> Result<Option<Vec<std::net::IpAddr>>, String> {
 }
 
 /// 从 UI 控件读取当前配置，构造 AppConfig（不含 adapter_id，调用方补齐）。
-///
-/// 校验失败返回 Err(错误提示)，调用方应把提示显示到 config-error 文本上。
-/// 供"保存配置"与"启用旁路由"共用——启用前必须先保存 UI 上的 switch_mode /
-/// 静态 IP 等，否则启用走的是 core 里旧的 switch_mode（历史 bug：用户选了
-/// "网卡直改"但没点保存，启用时仍按路由叠加执行，网卡根本不会被改）。
 fn build_config_from_ui(app: &AppWindow) -> Result<AppConfig, String> {
     let ip: std::net::IpAddr = app
         .get_bypass_ip_text()
@@ -101,14 +102,60 @@ struct UiState {
     client: Option<ipc_client::IpcClient>,
     config: AppConfig,
     /// 上次 list_adapters 结果（下拉框数据源 + id 映射）。
-    adapters: Vec<ipc_protocol::AdapterInfo>,
+    adapters: Vec<AdapterInfo>,
+}
+
+/// 将多个 IPv4 地址格式化为逗号分隔字符串；取前 2 个避免过长。
+fn format_ips(ips: &[std::net::IpAddr]) -> String {
+    ips.iter()
+        .filter(|ip| matches!(ip, std::net::IpAddr::V4(_)))
+        .take(2)
+        .map(|ip| ip.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// 把选中的网卡信息同步到首页展示字段。
+fn update_adapter_info_display(app: &AppWindow, adapters: &[AdapterInfo], adapter_id: &str) {
+    if let Some(a) = adapters.iter().find(|a| a.id == adapter_id) {
+        let ip = if a.ipv4.is_empty() {
+            "--".to_string()
+        } else {
+            format_ips(&a.ipv4)
+        };
+        let mask = if a.ipv4_prefixes.is_empty() {
+            "--".to_string()
+        } else {
+            a.ipv4_prefixes
+                .iter()
+                .map(|p| format!("255.255.255.{}", 256 - (1u32 << (32 - p))))
+                .take(1)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let gw = if a.gateway.is_empty() {
+            "--".to_string()
+        } else {
+            format_ips(&a.gateway)
+        };
+        let dns = if a.dns.is_empty() {
+            "--".to_string()
+        } else {
+            format_ips(&a.dns)
+        };
+        app.set_selected_adapter_ip(ip.into());
+        app.set_selected_adapter_mask(mask.into());
+        app.set_selected_adapter_gateway(gw.into());
+        app.set_selected_adapter_dns(dns.into());
+    } else {
+        app.set_selected_adapter_ip("--".into());
+        app.set_selected_adapter_mask("--".into());
+        app.set_selected_adapter_gateway("--".into());
+        app.set_selected_adapter_dns("--".into());
+    }
 }
 
 /// 拉取网卡列表并填充下拉框；同时按配置里的 adapter_id 选中对应项。
-///
-/// 注意：必须在 client 已连接后调用。启动阶段与连接任务并行调用会因竞态
-/// 拿到 None 而空手而归（下拉框一直为空 = "无法选择网卡"），所以启动流程
-/// 已改为串行（连接 → 配置 → 网卡），本函数只用于轮询里的自愈补拉。
 async fn refresh_adapters(state: Arc<Mutex<UiState>>, app_weak: slint::Weak<AppWindow>) {
     let (cfg_id, result) = {
         let mut st = state.lock().await;
@@ -127,6 +174,8 @@ async fn refresh_adapters(state: Arc<Mutex<UiState>>, app_weak: slint::Weak<AppW
     let sel = list.iter().position(|a| a.id == cfg_id);
     let names: Vec<SharedString> = list.iter().map(|a| a.name.clone().into()).collect();
     let idx = sel.map(|i| i as i32).unwrap_or(-1);
+    let adapter_id = cfg_id;
+    let list_for_ui = list.clone();
 
     {
         let mut st = state.lock().await;
@@ -136,6 +185,7 @@ async fn refresh_adapters(state: Arc<Mutex<UiState>>, app_weak: slint::Weak<AppW
         if let Some(app) = app_weak.upgrade() {
             app.set_adapter_names(ModelRc::from(Rc::new(VecModel::from(names))));
             app.set_adapter_index(idx);
+            update_adapter_info_display(&app, &list_for_ui, &adapter_id);
         }
     });
 }
@@ -177,10 +227,80 @@ fn apply_config_to_ui(app: &AppWindow, cfg: &AppConfig) {
     app.set_dns_text(dns_text.into());
 }
 
+/// 读取最近的日志文件，解析为 Slint 模型。
+fn read_logs() -> Vec<LogEntry> {
+    let mut out = Vec::new();
+
+    // 优先读 UI 自身日志。
+    let ui_log = std::env::temp_dir().join("RouteTool").join("bypass-ui.log");
+    if ui_log.exists() {
+        read_log_file(&ui_log, &mut out);
+    }
+
+    // 再读核心日志（按日期）。
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let core_log = std::path::Path::new(CORE_LOG_DIR).join(format!("bypass-core.log.{}", today));
+    if core_log.exists() {
+        read_log_file(&core_log, &mut out);
+    }
+
+    // 合并后按时间排序并截断。
+    out.sort_by(|a, b| a.time.cmp(&b.time));
+    out.into_iter()
+        .rev()
+        .take(200)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+/// 读取单个日志文件，按 tracing 默认格式解析：
+/// `2026-09-09T08:40:22.123456Z  INFO module::path: message`
+fn read_log_file(path: &std::path::Path, out: &mut Vec<LogEntry>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // 尝试按空白拆分：时间、级别、目标:消息
+        let mut parts = line.splitn(3, ' ');
+        let time_raw = parts.next().unwrap_or("");
+        let level_raw = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or(line);
+
+        // 时间取 HH:MM:SS
+        let time = time_raw
+            .split_once('T')
+            .map(|(_, t)| {
+                t.split_once('.')
+                    .map(|(h, _)| h.to_string())
+                    .unwrap_or(t.to_string())
+            })
+            .unwrap_or_else(|| time_raw.to_string());
+
+        let level = level_raw.trim().to_uppercase();
+        // 去掉目标前缀（如 module::path:）
+        let message = if let Some((_, msg)) = rest.split_once(':') {
+            msg.trim().to_string()
+        } else {
+            rest.to_string()
+        };
+
+        out.push(LogEntry {
+            time: time.into(),
+            level: level.into(),
+            message: message.into(),
+        });
+    }
+}
+
 fn init_logging() {
     let dir = std::env::temp_dir().join("RouteTool");
     let _ = std::fs::create_dir_all(&dir);
-    // 日志保留巡检（§2：保留 7 天），UI 与 core 各自清理自己的前缀。
     core_lib::log_prune::prune_old_logs(&dir, "bypass-ui.log", core_lib::log_prune::LOG_RETENTION);
     let appender = tracing_appender::rolling::daily(dir, "bypass-ui.log");
     let (writer, _guard) = tracing_appender::non_blocking(appender);
@@ -191,15 +311,12 @@ fn init_logging() {
         .with_writer(writer)
         .with_ansi(false)
         .init();
-    // _guard 泄漏以保持日志器存活。
     std::mem::forget(_guard);
 }
 
 fn main() -> anyhow::Result<()> {
     init_logging();
 
-    // 单实例：已有 bypass-ui 在跑时直接退出（并通知其弹出设置窗口），
-    // 否则双击桌面图标会再起一个进程、托盘上多出一个图标。
     let _single_instance = match single_instance::acquire_or_notify()? {
         Some(guard) => guard,
         None => return Ok(()),
@@ -217,24 +334,15 @@ fn main() -> anyhow::Result<()> {
         adapters: Vec::new(),
     }));
 
-    // 事件循环由 Slint（winit 后端）独占持有。
-    //
-    // 这里**不能**再额外创建 tao/winit 的 EventLoop 与窗口：两个 windowing 栈同时
-    // 初始化会互相踩踏，实测表现为启动约 3 秒后 0xC0000374 STATUS_HEAP_CORRUPTION
-    // 直接退出（窗口闪一下就没了，托盘也不出现）。tray-icon 0.21 本身不依赖 tao，
-    // 靠 Slint 的消息泵即可收到菜单事件。
     let app = AppWindow::new()?;
-    // 托盘应用：关闭窗口 = 隐藏到托盘，不退出（核心独立运行不受影响）。
     app.window()
         .on_close_requested(move || slint::CloseRequestResponse::HideWindow);
     let tray = tray::Tray::new()?;
     let _ = tray::SHARED_TRAY.set(tray::StaticTray(tray));
 
+    app.set_version_text(VERSION.into());
+
     // ---- 连接核心：串行完成 连接 → 拉配置 → 拉网卡列表，一次性同步 UI ----
-    //
-    // 不能拆成并行的两个任务：拉网卡的分支抢锁时若 client 尚未就绪就会直接
-    // 返回，而轮询的健康路径不会再补拉，网卡下拉框将永远是空的。
-    // 连接失败（服务未就绪）时重试一段时间；彻底失败则交给 1s 轮询的重连逻辑。
     {
         let state = state.clone();
         let app_weak = app.as_weak();
@@ -258,7 +366,7 @@ fn main() -> anyhow::Result<()> {
             let cfg = client.get_config().await.ok();
             let adapters = client.list_adapters().await.ok();
 
-            let (cfg_id, adapter_names, adapter_idx) = {
+            let (cfg_id, adapter_names, adapter_idx, adapter_id_for_info) = {
                 let mut st = state.lock().await;
                 st.client = Some(client);
                 let cfg_id = match &cfg {
@@ -275,12 +383,13 @@ fn main() -> anyhow::Result<()> {
                             list.iter().map(|a| a.name.clone().into()).collect();
                         st.adapters = list.clone();
                         (
-                            Some(cfg_id),
+                            Some(cfg_id.clone()),
                             Some(names),
                             sel.map(|i| i as i32).unwrap_or(-1),
+                            cfg_id,
                         )
                     }
-                    None => (None, None, -1),
+                    None => (None, None, -1, cfg_id),
                 }
             };
 
@@ -293,9 +402,13 @@ fn main() -> anyhow::Result<()> {
                         app.set_adapter_names(ModelRc::from(Rc::new(VecModel::from(names))));
                         app.set_adapter_index(adapter_idx);
                     }
+                    update_adapter_info_display(
+                        &app,
+                        &adapters.unwrap_or_default(),
+                        &adapter_id_for_info,
+                    );
                 }
             });
-            // cfg_id 当前仅用于填充选中项；消除未使用告警（保留变量便于后续扩展）。
             let _ = cfg_id;
         });
     }
@@ -312,8 +425,8 @@ fn main() -> anyhow::Result<()> {
             rt.spawn(async move {
                 let mut st = state.lock().await;
                 if let Some(info) = st.adapters.get(idx as usize) {
-                    st.config.adapter_id = info.id.clone();
-                    // 立即落盘，避免启用时才发现未保存。
+                    let adapter_id = info.id.clone();
+                    st.config.adapter_id = adapter_id.clone();
                     let cfg = st.config.clone();
                     if let Some(c) = st.client.as_mut() {
                         if let Err(e) = c.update_config(&cfg).await {
@@ -321,6 +434,14 @@ fn main() -> anyhow::Result<()> {
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(app) = app_weak.upgrade() {
                                     app.set_config_error(format!("保存网卡选择失败: {e}").into());
+                                }
+                            });
+                        } else {
+                            let app_weak = app_weak.clone();
+                            let adapters = st.adapters.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(app) = app_weak.upgrade() {
+                                    update_adapter_info_display(&app, &adapters, &adapter_id);
                                 }
                             });
                         }
@@ -341,9 +462,6 @@ fn main() -> anyhow::Result<()> {
             let enable = !is_enabled_now(&app_weak);
             let rt = rt.clone();
 
-            // 启用前先从 UI 读取当前配置（尤其是 switch_mode）并同步到 core：
-            // 否则用户选了"网卡直改"却没点保存，启用时仍按 core 里旧的
-            // routeoverlay 执行，网卡根本不会被改（历史 bug 的根因）。
             let mut cfg = match app_weak.upgrade() {
                 Some(app) => match build_config_from_ui(&app) {
                     Ok(c) => c,
@@ -360,8 +478,6 @@ fn main() -> anyhow::Result<()> {
             };
 
             rt.spawn(async move {
-                // 先取 adapter_id（锁外一次性取好），避免在 client 借用期间
-                // 再访问 st.config 造成双重借用。
                 let adapter_id = {
                     let st = state.lock().await;
                     st.config.adapter_id.clone()
@@ -373,7 +489,6 @@ fn main() -> anyhow::Result<()> {
                     match st.client.as_mut() {
                         Some(c) => {
                             if enable {
-                                // 先落配置（含 switch_mode），再启用。
                                 match c.update_config(&cfg).await {
                                     Ok(()) => c.enable().await,
                                     Err(e) => Err(e),
@@ -408,7 +523,6 @@ fn main() -> anyhow::Result<()> {
         app.on_test_connectivity(move || {
             let state = state.clone();
             let app_weak = app_weak.clone();
-            // 先在 UI 线程取 IP 文本（slint 对象非 Send）。
             let ip_text = app_weak
                 .upgrade()
                 .map(|a| a.get_bypass_ip_text().to_string())
@@ -453,7 +567,6 @@ fn main() -> anyhow::Result<()> {
         app.on_save_config(move || {
             let state = state.clone();
             let app_weak = app_weak.clone();
-            // 先在 UI 线程同步读取所有 UI 属性，再进异步任务（slint 对象非 Send）。
             let app = match app_weak.upgrade() {
                 Some(a) => a,
                 None => return,
@@ -470,7 +583,6 @@ fn main() -> anyhow::Result<()> {
             let rt = rt.clone();
             rt.spawn(async move {
                 let mut st = state.lock().await;
-                // UI 不直接编辑 adapter_id，保留原值。
                 cfg.adapter_id = st.config.adapter_id.clone();
                 let result = match st.client.as_mut() {
                     Some(c) => c.update_config(&cfg).await,
@@ -498,13 +610,77 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ---- UI 回调：恢复默认 ----
+    {
+        let state = state.clone();
+        let app_weak = app.as_weak();
+        let rt = rt.clone();
+        app.on_restore_default(move || {
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            rt.spawn(async move {
+                let mut st = state.lock().await;
+                let cfg = AppConfig {
+                    adapter_id: st.config.adapter_id.clone(),
+                    ..AppConfig::default()
+                };
+                let result = match st.client.as_mut() {
+                    Some(c) => c.update_config(&cfg).await,
+                    None => Err("未连接到核心服务".to_string()),
+                };
+                match result {
+                    Ok(()) => {
+                        st.config = cfg.clone();
+                        drop(st);
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(app) = app_weak.upgrade() {
+                                apply_config_to_ui(&app, &cfg);
+                                app.set_config_error("已恢复默认配置".into());
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(app) = app_weak.upgrade() {
+                                app.set_config_error(format!("恢复默认失败: {e}").into());
+                            }
+                        });
+                    }
+                }
+            });
+        });
+    }
+
     // ---- UI 回调：打开日志目录 ----
     app.on_open_logs(|| {
-        let dir = r"C:\ProgramData\RouteTool\logs";
+        let dir = CORE_LOG_DIR;
         let _ = std::process::Command::new("explorer").arg(dir).spawn();
     });
 
-    // ---- 状态轮询定时器（1s）：刷新状态文本 + 托盘 ----
+    // ---- UI 回调：刷新日志 ----
+    {
+        let app_weak = app.as_weak();
+        app.on_refresh_logs(move || {
+            let entries = read_logs();
+            let app_weak = app_weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let model = VecModel::from(entries);
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_log_entries(ModelRc::from(Rc::new(model)));
+                }
+            });
+        });
+    }
+
+    // ---- UI 回调：检查更新 ----
+    app.on_check_update(|| {
+        let url = "https://github.com/5kywa1ker/route-tool/releases";
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", url])
+            .spawn();
+    });
+
+    // ---- 状态轮询定时器（1s）：刷新状态文本 + 托盘 + 日志页 ----
     {
         let state = state.clone();
         let app_weak = app.as_weak();
@@ -522,7 +698,6 @@ fn main() -> anyhow::Result<()> {
                 let last_tray_state = last_tray_state.clone();
                 let rt = rt.clone();
                 rt.spawn(async move {
-                    // 网络调用在持锁范围内完成，随后释放锁再更新 UI。
                     let mut snapshot = {
                         let mut st = state.lock().await;
                         match st.client.as_mut() {
@@ -531,7 +706,6 @@ fn main() -> anyhow::Result<()> {
                         }
                     };
 
-                    // 未连接 → 尝试重连（核心服务可能晚于 UI 启动或重启过）。
                     if snapshot.is_none() {
                         let (reconnected, status_ok, cfg_ok, adapters_ok) = {
                             let mut st = state.lock().await;
@@ -550,8 +724,6 @@ fn main() -> anyhow::Result<()> {
                                 }
                             }
                         };
-                        // 重连成功后同步一次 UI（否则界面停在“未连接”）。握手
-                        // 失败视为未连上，还原 client = None，等下轮再试。
                         if !reconnected {
                             return;
                         }
@@ -564,7 +736,6 @@ fn main() -> anyhow::Result<()> {
                                     (Some(cfg), Some(list))
                                 }
                                 _ => {
-                                    // 握手不完整：回滚连接，保持“未连接”语义。
                                     st.client = None;
                                     (None, None)
                                 }
@@ -574,6 +745,7 @@ fn main() -> anyhow::Result<()> {
                             let sel = list.iter().position(|a| a.id == cfg.adapter_id);
                             let names: Vec<SharedString> =
                                 list.iter().map(|a| a.name.clone().into()).collect();
+                            let adapter_id = cfg.adapter_id.clone();
                             let app_weak = app_weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(app) = app_weak.upgrade() {
@@ -582,14 +754,13 @@ fn main() -> anyhow::Result<()> {
                                         names,
                                     ))));
                                     app.set_adapter_index(sel.map(|i| i as i32).unwrap_or(-1));
+                                    update_adapter_info_display(&app, &list, &adapter_id);
                                 }
                             });
                         }
-                        // 重连当轮就拿到了新状态，直接用它刷新。
                         snapshot = status_ok;
                     }
 
-                    // get_status 连续失败视为连接失效，丢弃 client 触发下轮重连。
                     if snapshot.is_none() {
                         let mut st = state.lock().await;
                         if let Some(c) = st.client.as_mut() {
@@ -601,7 +772,6 @@ fn main() -> anyhow::Result<()> {
                     }
                     let Some(rs) = snapshot else { return };
 
-                    // 网卡列表尚未就绪时补拉一次（自愈启动竞态/首次连接失败）。
                     let need_adapter_refresh = {
                         let st = state.lock().await;
                         st.adapters.is_empty()
@@ -635,7 +805,18 @@ fn main() -> anyhow::Result<()> {
                     };
                     let is_enabled = rs.is_enabled;
 
-                    // 回退 Toast（只在状态从非回退变为回退、且用户开启通知时弹）。
+                    let latency = rs.last_latency_ms.map(|v| v as i32).unwrap_or(-1);
+                    let last_check = if rs.last_updated.timestamp() > 0 {
+                        let elapsed = (chrono::Utc::now() - rs.last_updated).num_seconds();
+                        if elapsed < 60 {
+                            "刚刚".to_string()
+                        } else {
+                            format!("{}分钟前", elapsed / 60)
+                        }
+                    } else {
+                        "--".to_string()
+                    };
+
                     let notifications_enabled = {
                         let st = state.lock().await;
                         st.config.notifications_enabled
@@ -647,7 +828,6 @@ fn main() -> anyhow::Result<()> {
                     *lf = is_fb;
                     drop(lf);
 
-                    // 托盘在图标状态变化、或启用状态变化（菜单文字切换）时刷新。
                     let tray_changed = {
                         let mut lts = last_tray_state.lock().await;
                         let changed = *lts != (tray_state, is_enabled);
@@ -659,6 +839,8 @@ fn main() -> anyhow::Result<()> {
                             app.set_status_text(txt.into());
                             app.set_is_enabled(is_enabled);
                             app.set_is_fallback(is_fb);
+                            app.set_latency_ms(latency);
+                            app.set_last_check_text(last_check.into());
                         }
                         if tray_changed {
                             if let Some(t) = tray::SHARED_TRAY.get() {
@@ -669,7 +851,7 @@ fn main() -> anyhow::Result<()> {
                 });
             },
         );
-        std::mem::forget(timer); // 保活
+        std::mem::forget(timer);
     }
 
     // ---- 托盘菜单事件 + 二次启动唤起 轮询（200ms）----
@@ -680,7 +862,6 @@ fn main() -> anyhow::Result<()> {
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(200),
             move || {
-                // 用户再次双击桌面图标 → 通知事件 → 弹出已有实例的设置窗口。
                 if single_instance::poll_show_request() {
                     if let Some(a) = app_weak.upgrade() {
                         a.window().show().ok();
@@ -699,12 +880,10 @@ fn main() -> anyhow::Result<()> {
                     }
                     Some(tray::TrayAction::OpenLogs) => {
                         let _ = std::process::Command::new("explorer")
-                            .arg(r"C:\ProgramData\RouteTool\logs")
+                            .arg(CORE_LOG_DIR)
                             .spawn();
                     }
                     Some(tray::TrayAction::Quit) => {
-                        // 先显式移除托盘图标再退出：进程结束后 Windows 会残留“幽灵图标”，
-                        // 看起来像没有退出干净。
                         if let Some(t) = tray::SHARED_TRAY.get() {
                             t.hide_icon();
                         }
@@ -714,19 +893,14 @@ fn main() -> anyhow::Result<()> {
                 }
             },
         );
-        std::mem::forget(timer); // 保活
+        std::mem::forget(timer);
     }
 
     app.show()?;
-    // 托盘常驻：窗口隐藏/无可见 UI 也不退出事件循环，直到显式 quit。
     slint::run_event_loop_until_quit()?;
-
-    // 事件循环退出（托盘“退出”）后立即终止进程：不等任何残留句柄/后台任务，
-    // 确保任务管理器里不留 bypass-ui.exe。
     std::process::exit(0);
 }
 
-/// 当前是否启用（从 UI 状态读）。
 fn is_enabled_now(app: &slint::Weak<AppWindow>) -> bool {
     app.upgrade().map(|a| a.get_is_enabled()).unwrap_or(false)
 }

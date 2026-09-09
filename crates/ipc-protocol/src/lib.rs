@@ -109,6 +109,9 @@ pub struct RuntimeState {
     pub current_mode: Option<SwitchMode>,
     pub health: HealthStatus,
     pub last_updated: DateTime<Utc>,
+    /// 上次健康探测到旁路由的往返延迟（毫秒）。None 表示尚未完成有效探测。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_latency_ms: Option<u32>,
 }
 
 impl Default for RuntimeState {
@@ -118,6 +121,7 @@ impl Default for RuntimeState {
             current_mode: None,
             health: HealthStatus::Idle,
             last_updated: Utc::now(),
+            last_latency_ms: None,
         }
     }
 }

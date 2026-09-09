@@ -102,23 +102,23 @@ async fn tick(ctx: &HealthCtx, params: &HealthParams, state: &mut HealthState) {
         return;
     }
 
-    let probe = try_ping(ctx.inspector.as_ref(), params.target.bypass_ip).await;
-    let consecutive = match probe {
+    let (reachable, latency_ms) = try_ping(ctx.inspector.as_ref(), params.target.bypass_ip).await;
+    let consecutive = match reachable {
         true => handle_success(ctx, params, state).await,
         false => handle_failure(ctx, params, state).await,
     };
 
-    update_runtime_health(ctx, state, consecutive).await;
+    update_runtime_health(ctx, state, consecutive, latency_ms).await;
 }
 
-/// 返回 Ping 是否可达。
-async fn try_ping(inspector: &dyn NetInspector, ip: IpAddr) -> bool {
+/// 返回 (是否可达, 延迟毫秒)。
+async fn try_ping(inspector: &dyn NetInspector, ip: IpAddr) -> (bool, Option<u32>) {
     match inspector.ping(ip, PING_TIMEOUT_MS).await {
-        Ok(true) => true,
-        Ok(false) => false,
+        Ok(Some(ms)) => (true, Some(ms)),
+        Ok(None) => (false, None),
         Err(e) => {
             warn!("ping {ip} failed with error: {e}");
-            false
+            (false, None)
         }
     }
 }
@@ -283,8 +283,13 @@ async fn reenable(ctx: &HealthCtx, params: &HealthParams) -> Result<()> {
     Ok(())
 }
 
-/// 更新 runtime 的健康状态字段（与状态机保持一致）。
-async fn update_runtime_health(ctx: &HealthCtx, state: &HealthState, consecutive: Option<u32>) {
+/// 更新 runtime 的健康状态字段（与状态机保持一致）并记录延迟。
+async fn update_runtime_health(
+    ctx: &HealthCtx,
+    state: &HealthState,
+    consecutive: Option<u32>,
+    latency_ms: Option<u32>,
+) {
     let mut rs = ctx.runtime.write().await;
     match state {
         HealthState::Idle => rs.health = HealthStatus::Idle,
@@ -297,6 +302,7 @@ async fn update_runtime_health(ctx: &HealthCtx, state: &HealthState, consecutive
         }
         HealthState::Fallback => rs.health = HealthStatus::Fallback,
     }
+    rs.last_latency_ms = latency_ms;
     rs.last_updated = chrono::Utc::now();
 }
 
@@ -347,7 +353,7 @@ mod tests {
             })
         }
 
-        async fn ping(&self, _ip: IpAddr, _timeout_ms: u32) -> crate::Result<bool> {
+        async fn ping(&self, _ip: IpAddr, _timeout_ms: u32) -> crate::Result<Option<u32>> {
             // fail_first=N：前 N 次失败，之后成功；u32::MAX 视为一直失败。
             let prev = self
                 .fail_first
@@ -358,7 +364,11 @@ mod tests {
                         Some(v - 1)
                     }
                 });
-            Ok(matches!(prev, Ok(0)))
+            Ok(if matches!(prev, Ok(0)) {
+                Some(28)
+            } else {
+                None
+            })
         }
     }
 

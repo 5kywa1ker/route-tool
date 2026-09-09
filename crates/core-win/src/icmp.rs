@@ -32,15 +32,15 @@ pub fn in_addr_from(ip: Ipv4Addr) -> IN_ADDR {
     a
 }
 
-/// 单次 ICMP ping，返回是否可达（收到 Reply 且 Status == IP_SUCCESS）。
-/// `timeout_ms` 为等待毫秒。
-pub fn ping_ipv4(addr: Ipv4Addr, timeout_ms: u32) -> bool {
+/// 单次 ICMP ping，返回 `Some(往返毫秒)`（收到 Reply 且 Status == IP_SUCCESS），
+/// 不可达/超时/失败返回 `None`。`timeout_ms` 为等待毫秒。
+pub fn ping_ipv4(addr: Ipv4Addr, timeout_ms: u32) -> Option<u32> {
     let handle: HANDLE = match unsafe { IcmpCreateFile() } {
         Ok(h) => h,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     if handle.is_invalid() {
-        return false;
+        return None;
     }
 
     // IcmpSendEcho 的目标地址是网络序 u32。
@@ -73,8 +73,12 @@ pub fn ping_ipv4(addr: Ipv4Addr, timeout_ms: u32) -> bool {
     // 关键：返回值 >0 不代表成功（缓冲区不足、超时等也会返回 1），
     // 必须检查 reply.Status == IP_SUCCESS(0)，否则会得到假阳性。
     if n_replies == 0 {
-        return false;
+        return None;
     }
     let r = unsafe { &*(reply.as_ptr() as *const ICMP_ECHO_REPLY) };
-    r.Status == 0
+    if r.Status != 0 {
+        return None;
+    }
+    // RoundTripTime 字段单位为毫秒。
+    Some(r.RoundTripTime)
 }

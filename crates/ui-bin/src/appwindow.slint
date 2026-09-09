@@ -1,248 +1,685 @@
-// RouteTool 设置窗口 —— Windows 11 Fluent 风格布局。
+// RouteTool 设置窗口 —— 侧边栏多页面布局（首页 / 配置 / 日志 / 关于）。
 
-import { Button, ComboBox, LineEdit, SpinBox, CheckBox, GridBox, ScrollView } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, SpinBox, CheckBox, ScrollView } from "std-widgets.slint";
 
-export component AppWindow inherits Window {
-    title: "RouteTool";
-    icon: @image-url("../../../assets/app.png");
-    preferred-width: 480px;
-    preferred-height: 600px;
-    min-width: 440px;
-    min-height: 500px;
+// 全局主题色
+export global Theme {
+    out property <color> accent-blue: #0078d4;
+    out property <color> bg-gray: #f3f3f3;
+    out property <color> card-gray: #fafafa;
+    out property <color> border-gray: #e5e5e5;
+    out property <color> text-primary: #1a1a1a;
+    out property <color> text-secondary: #5d5d5d;
+    out property <color> text-tertiary: #888888;
+    out property <color> success: #0f7b0f;
+    out property <color> error: #c42b1c;
+    out property <color> warning: #9c5b00;
+}
 
-    // 用户可编辑的控件属性一律用 in-out + 双向绑定（<=>）：
-    // 单向绑定会让 Rust 侧属性与控件实际状态失同步。
-    in property <string> status-text: "未连接到核心服务";
-    in property <bool> is-enabled: false;
-    in property <bool> is-fallback: false;
-    in property <[string]> adapter-names: [];
-    in-out property <int> adapter-index: -1;
-    in-out property <string> bypass-ip-text: "";
-    in-out property <int> mode-index: 0;         // 0=路由叠加 1=网卡直改
-    in-out property <string> dns-text: "";
-    in-out property <string> mask-text: "";
-    in-out property <string> static-ip-text: "";
-    in-out property <int> interval-secs: 5;
-    in-out property <int> failure-threshold: 3;
-    in-out property <bool> auto-reenable: false;
-    in-out property <bool> notifications: true;
-    in property <string> test-result: "";
-    in property <string> config-error: "";
+// 日志条目模型
+export struct LogEntry {
+    time: string,
+    level: string,
+    message: string,
+}
 
-    callback toggle-bypass();
-    callback test-connectivity();
-    callback save-config();
-    callback open-logs();
-    callback adapter-changed(int);
+// ------------------------------------------------------------------
+// 通用组件
+// ------------------------------------------------------------------
+component Card {
+    Rectangle {
+        background: Theme.card-gray;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border-gray;
+        drop-shadow-offset-x: 0;
+        drop-shadow-offset-y: 2px;
+        drop-shadow-blur: 6px;
+        drop-shadow-color: #00000008;
+        @children
+    }
+}
 
-    // 状态语义色：绿=旁路由生效，红=异常回退，灰=直连/未连接。
-    property <color> status-color: root.is-fallback ? #c42b1c
-        : (root.is-enabled ? #0f7b0f : #5d5d5d);
+component ToggleSwitch {
+    in-out property <bool> checked;
+    in property <string> text;
+    callback toggled();
 
-    ScrollView {
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: center;
+        Rectangle {
+            width: 44px;
+            height: 24px;
+            border-radius: 12px;
+            background: root.checked ? Theme.accent-blue : #c4c4c4;
+            Rectangle {
+                x: root.checked ? 22px : 2px;
+                y: 2px;
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                background: #ffffff;
+                animate x { duration: 150ms; easing: ease-in-out; }
+            }
+            TouchArea {
+                clicked => {
+                    root.checked = !root.checked;
+                    root.toggled();
+                }
+            }
+        }
+        Text {
+            text: root.text;
+            font-size: 13px;
+            color: Theme.text-primary;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component FormRow {
+    in property <string> label;
+
+    VerticalLayout {
+        spacing: 4px;
+        Text {
+            text: root.label;
+            font-size: 12px;
+            color: Theme.text-secondary;
+        }
+        @children
+    }
+}
+
+component StatItem {
+    in property <string> label;
+    in property <string> value;
+    in property <string> sub-value;
+    in property <color> value-color: Theme.text-primary;
+
+    Rectangle {
+        background: #ffffff;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border-gray;
+        min-width: 120px;
         VerticalLayout {
-        padding: 16px;
-        spacing: 12px;
-
-        // ---- 标题区 ----
-        HorizontalLayout {
-            spacing: 10px;
-            alignment: center;
+            padding: 12px;
+            spacing: 4px;
             Text {
-                text: "RouteTool";
-                font-size: 22px;
-                font-weight: 600;
-                color: #1a1a1a;
+                text: root.label;
+                font-size: 11px;
+                color: Theme.text-secondary;
             }
             Text {
-                text: "旁路由切换";
-                font-size: 12px;
-                color: #888888;
+                text: root.value;
+                font-size: 18px;
+                font-weight: 600;
+                color: root.value-color;
+            }
+            if root.sub-value != "": Text {
+                text: root.sub-value;
+                font-size: 10px;
+                color: Theme.text-tertiary;
+            }
+        }
+    }
+}
+
+component InfoRow {
+    in property <string> label;
+    in property <string> value;
+
+    VerticalLayout {
+        spacing: 2px;
+        Text {
+            text: root.label;
+            font-size: 11px;
+            color: Theme.text-secondary;
+        }
+        Text {
+            text: root.value;
+            font-size: 13px;
+            font-weight: 600;
+            color: Theme.text-primary;
+        }
+    }
+}
+
+component ModeCard {
+    in property <string> title;
+    in property <string> desc;
+    in property <string> icon-name;
+    in property <bool> selected;
+    callback clicked();
+
+    Rectangle {
+        min-width: 180px;
+        background: root.selected ? #e8f4fd : #ffffff;
+        border-radius: 10px;
+        border-width: root.selected ? 2px : 1px;
+        border-color: root.selected ? Theme.accent-blue : Theme.border-gray;
+        VerticalLayout {
+            padding: 14px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    background: root.selected ? #ffffff : Theme.bg-gray;
+                    border-radius: 6px;
+                    Path {
+                        x: 4px;
+                        y: 4px;
+                        width: 24px;
+                        height: 24px;
+                        fill: root.selected ? Theme.accent-blue : Theme.text-secondary;
+                        viewbox-x: 0;
+                        viewbox-y: 0;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: root.icon-name == "stack"
+                            ? "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"
+                            : "M4 16v2h16v-2H4zm0-6v2h16v-2H4zm0-6v2h16V4H4z";
+                    }
+                }
+                VerticalLayout {
+                    spacing: 2px;
+                    alignment: center;
+                    Text {
+                        text: root.title;
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
+                    }
+                    Text {
+                        text: root.desc;
+                        font-size: 11px;
+                        color: Theme.text-secondary;
+                    }
+                }
+            }
+            if root.selected: Text {
+                text: "已选择";
+                font-size: 11px;
+                color: Theme.accent-blue;
+            }
+        }
+        TouchArea {
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+component RouteOverlayCard {
+    in property <string> bypass-ip;
+
+    Rectangle {
+        background: #ffffff;
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: Theme.border-gray;
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: start;
+                Rectangle {
+                    width: 40px;
+                    height: 40px;
+                    background: #e8f4fd;
+                    border-radius: 8px;
+                    Path {
+                        x: 8px;
+                        y: 8px;
+                        width: 24px;
+                        height: 24px;
+                        fill: Theme.accent-blue;
+                        viewbox-x: 0;
+                        viewbox-y: 0;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5";
+                    }
+                }
+                VerticalLayout {
+                    spacing: 2px;
+                    alignment: center;
+                    Text {
+                        text: "路由叠加";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
+                    }
+                    Text {
+                        text: "通过旁路由 IP 进行流量转发";
+                        font-size: 12px;
+                        color: Theme.text-secondary;
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "旁路由 IP：";
+                    font-size: 12px;
+                    color: Theme.text-secondary;
+                }
+                Text {
+                    text: root.bypass-ip;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Theme.text-primary;
+                }
+            }
+        }
+    }
+}
+
+component AdapterReconfigCard {
+    in property <string> ip;
+    in property <string> mask;
+    in property <string> gateway;
+    in property <string> dns;
+
+    Rectangle {
+        background: #ffffff;
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: Theme.border-gray;
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: start;
+                Rectangle {
+                    width: 40px;
+                    height: 40px;
+                    background: #f0f9e8;
+                    border-radius: 8px;
+                    Path {
+                        x: 8px;
+                        y: 8px;
+                        width: 24px;
+                        height: 24px;
+                        fill: Theme.success;
+                        viewbox-x: 0;
+                        viewbox-y: 0;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: "M4 16v2h16v-2H4zm0-6v2h16v-2H4zm0-6v2h16V4H4z";
+                    }
+                }
+                VerticalLayout {
+                    spacing: 2px;
+                    alignment: center;
+                    Text {
+                        text: "网卡直改";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
+                    }
+                    Text {
+                        text: "修改网卡 IP、网关、DNS 指向旁路由";
+                        font-size: 12px;
+                        color: Theme.text-secondary;
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    InfoRow { label: "网卡 IP"; value: root.ip; }
+                    InfoRow { label: "子网掩码"; value: root.mask; }
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    InfoRow { label: "网关"; value: root.gateway; }
+                    InfoRow { label: "DNS"; value: root.dns; }
+                }
+            }
+        }
+    }
+}
+
+component SidebarItem {
+    in property <string> icon-data;
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+
+    Rectangle {
+        height: 38px;
+        background: root.selected ? #e8f4fd : transparent;
+        border-radius: 6px;
+        HorizontalLayout {
+            padding: 8px;
+            spacing: 10px;
+            alignment: start;
+            Path {
+                width: 18px;
+                height: 18px;
+                fill: root.selected ? Theme.accent-blue : Theme.text-secondary;
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: root.icon-data;
+            }
+            Text {
+                text: root.label;
+                font-size: 13px;
+                font-weight: root.selected ? 600 : 400;
+                color: root.selected ? Theme.accent-blue : Theme.text-secondary;
                 vertical-alignment: center;
             }
         }
+        TouchArea {
+            clicked => { root.clicked(); }
+        }
+    }
+}
 
-        // ---- 状态卡片 ----
-        Rectangle {
-            border-radius: 8px;
-            background: #f5f5f5;
-            border-width: 1px;
-            border-color: #e6e6e6;
-            VerticalLayout {
-                padding: 14px;
-                spacing: 10px;
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: center;
-                    Rectangle {
-                        width: 10px;
-                        height: 10px;
-                        border-radius: 5px;
-                        background: root.status-color;
+component HomePage {
+    in property <string> status-text;
+    in property <color> status-color;
+    in property <bool> is-enabled;
+    in property <bool> is-fallback;
+    in property <int> latency-ms;
+    in property <string> last-check-text;
+    in property <int> mode-index;
+    in property <string> bypass-ip-text;
+    in property <string> adapter-ip;
+    in property <string> adapter-mask;
+    in property <string> adapter-gateway;
+    in property <string> adapter-dns;
+    in property <string> test-result;
+    callback toggle();
+    callback test-connectivity();
+    callback switch-mode();
+
+    ScrollView {
+        VerticalLayout {
+            padding: 0px;
+            spacing: 16px;
+
+            Text {
+                text: "首页";
+                font-size: 20px;
+                font-weight: 600;
+                color: Theme.text-primary;
+            }
+
+            Card {
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 14px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        alignment: start;
+                        Rectangle {
+                            width: 12px;
+                            height: 12px;
+                            border-radius: 6px;
+                            background: root.status-color;
+                            drop-shadow-offset-x: 0;
+                            drop-shadow-offset-y: 0;
+                            drop-shadow-blur: 6px;
+                            drop-shadow-color: root.status-color;
+                        }
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text {
+                                text: root.status-text;
+                                font-size: 16px;
+                                font-weight: 600;
+                                color: Theme.text-primary;
+                            }
+                            Text {
+                                text: root.is-enabled ? "当前流量已通过旁路由" : "当前为直连状态";
+                                font-size: 12px;
+                                color: Theme.text-secondary;
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: end;
+                            ToggleSwitch {
+                                checked: root.is-enabled;
+                                text: "启用旁路由";
+                                toggled => { root.toggle(); }
+                            }
+                        }
                     }
-                    Text {
-                        text: root.status-text;
-                        font-size: 14px;
-                        font-weight: 600;
-                        color: #1a1a1a;
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        StatItem {
+                            label: "延迟";
+                            value: root.latency-ms >= 0 ? root.latency-ms + " ms" : "--";
+                            sub-value: root.is-enabled ? "旁路由" : "";
+                        }
+                        StatItem {
+                            label: "网络连通性";
+                            value: root.is-fallback ? "异常" : (root.is-enabled ? "正常" : "--");
+                            value-color: root.is-fallback ? Theme.error : (root.is-enabled ? Theme.success : Theme.text-secondary);
+                            sub-value: root.is-enabled ? "检测中" : "";
+                        }
+                        StatItem {
+                            label: "上次检测";
+                            value: root.last-check-text;
+                            sub-value: "";
+                        }
                     }
-                }
-                HorizontalLayout {
-                    spacing: 10px;
-                    Button {
-                        text: root.is-enabled ? "禁用旁路由" : "启用旁路由";
-                        primary: true;
-                        clicked => { root.toggle-bypass(); }
-                    }
+
                     Button {
                         text: "测试连通性";
+                        primary: false;
                         clicked => { root.test-connectivity(); }
                     }
-                }
-                if root.test-result != "": Text {
-                    text: root.test-result;
-                    font-size: 11px;
-                    color: #666666;
+                    if root.test-result != "": Text {
+                        text: root.test-result;
+                        font-size: 11px;
+                        color: Theme.text-secondary;
+                        wrap: word-wrap;
+                    }
                 }
             }
+
+            Card {
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 14px;
+                    HorizontalLayout {
+                        Text {
+                            text: "当前模式";
+                            font-size: 15px;
+                            font-weight: 600;
+                            color: Theme.text-primary;
+                        }
+                        HorizontalLayout {
+                            alignment: end;
+                            Text {
+                                text: "切换模式";
+                                font-size: 12px;
+                                color: Theme.accent-blue;
+                                TouchArea {
+                                    clicked => { root.switch-mode(); }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.mode-index == 0: RouteOverlayCard {
+                        bypass-ip: root.bypass-ip-text;
+                    }
+
+                    if root.mode-index == 1: AdapterReconfigCard {
+                        ip: root.adapter-ip;
+                        mask: root.adapter-mask;
+                        gateway: root.adapter-gateway;
+                        dns: root.adapter-dns;
+                    }
+                }
+            }
+
+            Text {
+                text: root.mode-index == 0
+                    ? "提示：当前为路由叠加模式，通过添加 0.0.0.0/1 与 128.0.0.0/1 两条路由覆盖默认路由，若需要修改配置请前往配置页面。"
+                    : "提示：当前为网卡直改模式，修改网卡 IP、网关、DNS 指向旁路由，配置页面可调整静态 IP 等参数。";
+                font-size: 11px;
+                color: Theme.text-tertiary;
+                wrap: word-wrap;
+            }
         }
+    }
+}
 
-        // ---- 配置卡片 ----
-        Rectangle {
-            border-radius: 8px;
-            background: #f5f5f5;
-            border-width: 1px;
-            border-color: #e6e6e6;
-            VerticalLayout {
-                padding: 14px;
-                spacing: 10px;
-                Text {
-                    text: "配置";
-                    font-size: 15px;
-                    font-weight: 600;
-                    color: #1a1a1a;
-                }
+component ConfigPage {
+    in-out property <int> mode-index;
+    in property <[string]> adapter-names;
+    in-out property <int> adapter-index;
+    in-out property <string> bypass-ip-text;
+    in-out property <string> static-ip-text;
+    in-out property <string> mask-text;
+    in-out property <string> dns-text;
+    in-out property <int> interval-secs;
+    in-out property <int> failure-threshold;
+    in-out property <bool> auto-reenable;
+    in-out property <bool> notifications;
+    in property <string> config-error;
+    callback adapter-changed(int);
+    callback save-config();
+    callback restore-default();
 
-                // 网卡
+    ScrollView {
+        VerticalLayout {
+            padding: 0px;
+            spacing: 16px;
+
+            Text {
+                text: "配置";
+                font-size: 20px;
+                font-weight: 600;
+                color: Theme.text-primary;
+            }
+
+            Card {
                 VerticalLayout {
-                    spacing: 4px;
+                    padding: 16px;
+                    spacing: 12px;
                     Text {
-                        text: "网卡";
-                        font-size: 12px;
-                        color: #5d5d5d;
+                        text: "选择模式";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
                     }
-                    ComboBox {
-                        model: root.adapter-names;
-                        current-index <=> root.adapter-index;
-                        selected => { root.adapter-changed(self.current-index); }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        ModeCard {
+                            title: "路由叠加";
+                            desc: "通过旁路由 IP 进行流量转发";
+                            icon-name: "stack";
+                            selected: root.mode-index == 0;
+                            clicked => { root.mode-index = 0; }
+                        }
+                        ModeCard {
+                            title: "网卡直改";
+                            desc: "修改网卡 IP、网关、DNS";
+                            icon-name: "adapter";
+                            selected: root.mode-index == 1;
+                            clicked => { root.mode-index = 1; }
+                        }
                     }
                 }
+            }
 
-                // 旁路由 IP
+            Card {
                 VerticalLayout {
-                    spacing: 4px;
+                    padding: 16px;
+                    spacing: 14px;
                     Text {
-                        text: "旁路由 IP";
-                        font-size: 12px;
-                        color: #5d5d5d;
+                        text: root.mode-index == 0 ? "旁路由设置" : "网卡直改设置";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
                     }
-                    LineEdit {
-                        text <=> root.bypass-ip-text;
-                        placeholder-text: "例如 192.168.2.1";
+
+                    FormRow {
+                        label: "网卡";
+                        ComboBox {
+                            model: root.adapter-names;
+                            current-index <=> root.adapter-index;
+                            selected => { root.adapter-changed(self.current-index); }
+                        }
+                    }
+
+                    FormRow {
+                        label: "旁路由 IP";
+                        LineEdit {
+                            text <=> root.bypass-ip-text;
+                            placeholder-text: "例如 192.168.123.105";
+                        }
+                    }
+
+                    if root.mode-index == 1: VerticalLayout {
+                        spacing: 12px;
+                        FormRow {
+                            label: "网卡静态 IP";
+                            LineEdit {
+                                text <=> root.static-ip-text;
+                                placeholder-text: "留空则保留当前 IP";
+                            }
+                        }
+                        FormRow {
+                            label: "子网掩码";
+                            LineEdit {
+                                text <=> root.mask-text;
+                                placeholder-text: "255.255.255.0";
+                            }
+                        }
+                        FormRow {
+                            label: "DNS";
+                            LineEdit {
+                                text <=> root.dns-text;
+                                placeholder-text: "留空则使用旁路由 IP";
+                            }
+                        }
                     }
                 }
+            }
 
-                // 切换模式
+            Card {
                 VerticalLayout {
-                    spacing: 4px;
+                    padding: 16px;
+                    spacing: 14px;
                     Text {
-                        text: "切换模式";
-                        font-size: 12px;
-                        color: #5d5d5d;
+                        text: "高级选项";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
                     }
-                    ComboBox {
-                        model: ["路由叠加（推荐）", "网卡直改"];
-                        current-index <=> root.mode-index;
-                    }
-                }
-
-                // 网卡直改模式独有配置
-                if root.mode-index == 1: VerticalLayout {
-                    spacing: 10px;
-                    VerticalLayout {
-                        spacing: 4px;
-                        Text {
-                            text: "网卡静态 IP";
-                            font-size: 12px;
-                            color: #5d5d5d;
-                        }
-                        LineEdit {
-                            text <=> root.static-ip-text;
-                            placeholder-text: "留空则保留当前 IP";
+                    FormRow {
+                        label: "检测间隔（秒）";
+                        SpinBox {
+                            minimum: 1;
+                            maximum: 60;
+                            value <=> root.interval-secs;
                         }
                     }
-                    VerticalLayout {
-                        spacing: 4px;
-                        Text {
-                            text: "子网掩码";
-                            font-size: 12px;
-                            color: #5d5d5d;
-                        }
-                        LineEdit {
-                            text <=> root.mask-text;
-                            placeholder-text: "255.255.255.0";
+                    FormRow {
+                        label: "失败阈值";
+                        SpinBox {
+                            minimum: 1;
+                            maximum: 10;
+                            value <=> root.failure-threshold;
                         }
                     }
-                    VerticalLayout {
-                        spacing: 4px;
-                        Text {
-                            text: "DNS";
-                            font-size: 12px;
-                            color: #5d5d5d;
-                        }
-                        LineEdit {
-                            text <=> root.dns-text;
-                            placeholder-text: "留空则使用旁路由 IP";
-                        }
-                    }
-                }
-
-                // 健康检测参数（两列）
-                GridBox {
-                    spacing: 10px;
-                    Row {
-                        VerticalLayout {
-                            spacing: 4px;
-                            Text {
-                                text: "检测间隔（秒）";
-                                font-size: 12px;
-                                color: #5d5d5d;
-                            }
-                            SpinBox {
-                                minimum: 1;
-                                maximum: 60;
-                                value <=> root.interval-secs;
-                            }
-                        }
-                        VerticalLayout {
-                            spacing: 4px;
-                            Text {
-                                text: "失败阈值";
-                                font-size: 12px;
-                                color: #5d5d5d;
-                            }
-                            SpinBox {
-                                minimum: 1;
-                                maximum: 10;
-                                value <=> root.failure-threshold;
-                            }
-                        }
-                    }
-                }
-
-                // 开关项
-                VerticalLayout {
-                    spacing: 8px;
                     CheckBox {
                         text: "旁路由恢复后自动重新启用";
                         checked <=> root.auto-reenable;
@@ -253,35 +690,424 @@ export component AppWindow inherits Window {
                     }
                 }
             }
-        }
 
-        // 错误提示
-        if root.config-error != "": Text {
-            text: root.config-error;
-            font-size: 11px;
-            color: #c42b1c;
-        }
-
-        // 底部操作
-        HorizontalLayout {
-            spacing: 10px;
-            Button {
-                text: "保存配置";
-                clicked => { root.save-config(); }
+            if root.config-error != "": Text {
+                text: root.config-error;
+                font-size: 12px;
+                color: Theme.error;
+                wrap: word-wrap;
             }
-            Button {
-                text: "打开日志目录";
-                clicked => { root.open-logs(); }
-            }
-        }
 
-        // 说明文字
-        Text {
-            text: "路由叠加：添加 0.0.0.0/1 + 128.0.0.0/1 两条路由覆盖默认路由，不动网卡配置。\n网卡直改：把网卡设为静态 IP（建议填写），网关指向旁路由 IP，需备份恢复，风险略高。";
-            font-size: 10px;
-            color: #888888;
-            wrap: word-wrap;
-        }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    text: "恢复默认";
+                    primary: false;
+                    clicked => { root.restore-default(); }
+                }
+                Button {
+                    text: "保存";
+                    primary: true;
+                    clicked => { root.save-config(); }
+                }
+            }
         }
     }
+}
+
+component LogRow {
+    in property <string> time;
+    in property <string> level;
+    in property <string> message;
+
+    Rectangle {
+        height: 26px;
+        background: #ffffff;
+        HorizontalLayout {
+            padding: 4px;
+            spacing: 8px;
+            Text {
+                text: root.time;
+                font-size: 11px;
+                color: Theme.text-tertiary;
+                width: 80px;
+            }
+            Text {
+                text: root.level;
+                font-size: 11px;
+                font-weight: 600;
+                color: root.level == "ERROR" ? Theme.error
+                    : (root.level == "WARN" ? Theme.warning
+                    : (root.level == "INFO" ? Theme.accent-blue : Theme.text-secondary));
+                width: 50px;
+            }
+            Text {
+                text: root.message;
+                font-size: 11px;
+                color: Theme.text-primary;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+component LogsPage {
+    in property <[LogEntry]> log-entries;
+    callback open-logs();
+    callback refresh();
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 16px;
+
+        HorizontalLayout {
+            Text {
+                text: "日志";
+                font-size: 20px;
+                font-weight: 600;
+                color: Theme.text-primary;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button {
+                    text: "刷新";
+                    primary: false;
+                    clicked => { root.refresh(); }
+                }
+                Button {
+                    text: "打开日志目录";
+                    primary: false;
+                    clicked => { root.open-logs(); }
+                }
+            }
+        }
+
+        Card {
+            VerticalLayout {
+                padding: 0px;
+                spacing: 0px;
+                ScrollView {
+                    height: 440px;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 2px;
+                        for entry in root.log-entries: LogRow {
+                            time: entry.time;
+                            level: entry.level;
+                            message: entry.message;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component AboutPage {
+    in property <string> version-text;
+    callback check-update();
+
+    ScrollView {
+        VerticalLayout {
+            padding: 0px;
+            spacing: 16px;
+
+            Text {
+                text: "关于";
+                font-size: 20px;
+                font-weight: 600;
+                color: Theme.text-primary;
+            }
+
+            Card {
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 16px;
+                    alignment: center;
+                    Rectangle {
+                        width: 64px;
+                        height: 64px;
+                        background: Theme.accent-blue;
+                        border-radius: 14px;
+                        Text {
+                            text: "R";
+                            color: #ffffff;
+                            font-size: 32px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: "RouteTool";
+                        font-size: 20px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
+                    }
+                    Text {
+                        text: root.version-text;
+                        font-size: 13px;
+                        color: Theme.text-secondary;
+                    }
+                    Text {
+                        text: "Windows 桌面旁路由一键切换工具。支持路由叠加与网卡直改两种模式，具备旁路由异常自动侦测与回退能力。";
+                        font-size: 12px;
+                        color: Theme.text-secondary;
+                        wrap: word-wrap;
+                        horizontal-alignment: center;
+                    }
+                    Button {
+                        text: "检查更新";
+                        primary: true;
+                        clicked => { root.check-update(); }
+                    }
+                }
+            }
+
+            Card {
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+                    Text {
+                        text: "开源与许可";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
+                    }
+                    Text {
+                        text: "本项目采用 MIT 许可证开源。";
+                        font-size: 12px;
+                        color: Theme.text-secondary;
+                    }
+                    Text {
+                        text: "GitHub: https://github.com/5kywa1ker/route-tool";
+                        font-size: 12px;
+                        color: Theme.accent-blue;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------
+// 主窗口
+// ------------------------------------------------------------------
+export component AppWindow inherits Window {
+    title: "RouteTool 旁路由切换工具";
+    icon: @image-url("../../../assets/app.png");
+    preferred-width: 840px;
+    preferred-height: 600px;
+    min-width: 760px;
+    min-height: 520px;
+
+    in property <string> status-text: "未连接到核心服务";
+    in property <bool> is-enabled: false;
+    in property <bool> is-fallback: false;
+    in property <int> latency-ms: -1;
+    in property <string> last-check-text: "--";
+    in property <string> version-text: "v0.0.0";
+    in property <string> service-status-text: "服务运行中";
+
+    in property <[string]> adapter-names: [];
+    in-out property <int> adapter-index: -1;
+
+    in property <string> selected-adapter-ip: "--";
+    in property <string> selected-adapter-mask: "--";
+    in property <string> selected-adapter-gateway: "--";
+    in property <string> selected-adapter-dns: "--";
+
+    in-out property <string> bypass-ip-text: "";
+    in-out property <int> mode-index: 0;
+    in-out property <string> static-ip-text: "";
+    in-out property <string> mask-text: "";
+    in-out property <string> dns-text: "";
+    in-out property <int> interval-secs: 5;
+    in-out property <int> failure-threshold: 3;
+    in-out property <bool> auto-reenable: false;
+    in-out property <bool> notifications: true;
+    in property <string> test-result: "";
+    in property <string> config-error: "";
+
+    in property <[LogEntry]> log-entries: [];
+    in-out property <int> current-page: 0;
+
+    callback toggle-bypass();
+    callback test-connectivity();
+    callback save-config();
+    callback open-logs();
+    callback adapter-changed(int);
+    callback restore-default();
+    callback check-update();
+    callback refresh-logs();
+
+    property <color> status-color: root.is-fallback ? Theme.error
+        : (root.is-enabled ? Theme.success : Theme.text-secondary);
+
+    HorizontalLayout {
+        Rectangle {
+            width: 170px;
+            background: #ffffff;
+
+            Rectangle {
+                x: 169px;
+                width: 1px;
+                height: 100%;
+                background: Theme.border-gray;
+            }
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        background: Theme.accent-blue;
+                        border-radius: 6px;
+                        Text {
+                            text: "R";
+                            color: #ffffff;
+                            font-size: 14px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "RouteTool";
+                            font-size: 15px;
+                            font-weight: 600;
+                            color: Theme.text-primary;
+                        }
+                        Text {
+                            text: "旁路由切换";
+                            font-size: 10px;
+                            color: Theme.text-tertiary;
+                        }
+                    }
+                }
+
+                Rectangle { height: 16px; }
+
+                SidebarItem {
+                    icon-data: home-icon();
+                    label: "首页";
+                    selected: root.current-page == 0;
+                    clicked => { root.current-page = 0; }
+                }
+                SidebarItem {
+                    icon-data: config-icon();
+                    label: "配置";
+                    selected: root.current-page == 1;
+                    clicked => { root.current-page = 1; }
+                }
+                SidebarItem {
+                    icon-data: logs-icon();
+                    label: "日志";
+                    selected: root.current-page == 2;
+                    clicked => { root.current-page = 2; root.refresh-logs(); }
+                }
+                SidebarItem {
+                    icon-data: about-icon();
+                    label: "关于";
+                    selected: root.current-page == 3;
+                    clicked => { root.current-page = 3; }
+                }
+
+                VerticalLayout {
+                    alignment: end;
+                    spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: center;
+                        Rectangle {
+                            width: 6px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: root.service-status-text == "服务运行中" ? Theme.success : Theme.error;
+                        }
+                        Text {
+                            text: root.service-status-text;
+                            font-size: 11px;
+                            color: Theme.text-secondary;
+                        }
+                    }
+                    Text {
+                        text: root.version-text;
+                        font-size: 10px;
+                        color: Theme.text-tertiary;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            background: Theme.bg-gray;
+            HorizontalLayout {
+                padding: 20px;
+                spacing: 0px;
+
+                if root.current-page == 0: HomePage {
+                    status-text: root.status-text;
+                    status-color: root.status-color;
+                    is-enabled: root.is-enabled;
+                    is-fallback: root.is-fallback;
+                    latency-ms: root.latency-ms;
+                    last-check-text: root.last-check-text;
+                    mode-index: root.mode-index;
+                    bypass-ip-text: root.bypass-ip-text;
+                    adapter-ip: root.selected-adapter-ip;
+                    adapter-mask: root.selected-adapter-mask;
+                    adapter-gateway: root.selected-adapter-gateway;
+                    adapter-dns: root.selected-adapter-dns;
+                    test-result: root.test-result;
+                    toggle => { root.toggle-bypass(); }
+                    test-connectivity => { root.test-connectivity(); }
+                    switch-mode => { root.current-page = 1; }
+                }
+
+                if root.current-page == 1: ConfigPage {
+                    mode-index <=> root.mode-index;
+                    adapter-names: root.adapter-names;
+                    adapter-index <=> root.adapter-index;
+                    bypass-ip-text <=> root.bypass-ip-text;
+                    static-ip-text <=> root.static-ip-text;
+                    mask-text <=> root.mask-text;
+                    dns-text <=> root.dns-text;
+                    interval-secs <=> root.interval-secs;
+                    failure-threshold <=> root.failure-threshold;
+                    auto-reenable <=> root.auto-reenable;
+                    notifications <=> root.notifications;
+                    config-error: root.config-error;
+                    adapter-changed(index) => { root.adapter-changed(index); }
+                    save-config => { root.save-config(); }
+                    restore-default => { root.restore-default(); }
+                }
+
+                if root.current-page == 2: LogsPage {
+                    log-entries: root.log-entries;
+                    open-logs => { root.open-logs(); }
+                    refresh => { root.refresh-logs(); }
+                }
+
+                if root.current-page == 3: AboutPage {
+                    version-text: root.version-text;
+                    check-update => { root.check-update(); }
+                }
+            }
+        }
+    }
+
+    pure function home-icon() -> string { return "M12 3L4 9v11h6v-7h4v7h6V9L12 3z"; }
+    pure function config-icon() -> string { return "M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7m7.8-2.5l1.9.6.5 1.6-1.7 1.5-.1 1.9-2 .4-1.1 1.6-1.9-.7-1.8 1-1.4-1.4-1.9.7-1.1-1.6-2-.4-.1-1.9-1.7-1.5.5-1.6 1.9-.6.3-2-1.4-1.4 1.4-1.4-.3-2 1.9-.6-.5-1.6 1.7-1.5.1-1.9 2-.4 1.1-1.6 1.9.7 1.8-1 1.4 1.4 1.9-.7 1.1 1.6 2 .4.1 1.9 1.7 1.5-.5 1.6-1.9.6-.3 2 1.4 1.4-1.4 1.4z"; }
+    pure function logs-icon() -> string { return "M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"; }
+    pure function about-icon() -> string { return "M12 2a10 10 0 100 20 10 10 0 000-20zm1 15h-2v-6h2zm0-8h-2V7h2z"; }
 }
