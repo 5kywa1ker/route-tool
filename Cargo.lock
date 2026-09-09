@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "core-bin"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "core-lib"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1013,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "core-win"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "async-trait",
  "core-lib",
@@ -2775,7 +2775,7 @@ dependencies = [
 
 [[package]]
 name = "ipc-protocol"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "chrono",
  "serde",
@@ -5842,7 +5842,7 @@ dependencies = [
 
 [[package]]
 name = "ui-bin"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "chrono",

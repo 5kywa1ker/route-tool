@@ -1,12 +1,12 @@
 // RouteTool 设置窗口 —— Windows 11 Fluent 风格布局。
 
-import { Button, ComboBox, LineEdit, SpinBox, CheckBox, GridBox } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, SpinBox, CheckBox, GridBox, ScrollView } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
     title: "RouteTool";
     icon: @image-url("../../../assets/app.png");
     preferred-width: 480px;
-    preferred-height: 560px;
+    preferred-height: 600px;
     min-width: 440px;
     min-height: 500px;
 
@@ -38,7 +38,8 @@ export component AppWindow inherits Window {
     property <color> status-color: root.is-fallback ? #c42b1c
         : (root.is-enabled ? #0f7b0f : #5d5d5d);
 
-    VerticalLayout {
+    ScrollView {
+        VerticalLayout {
         padding: 16px;
         spacing: 12px;
 
@@ -267,6 +268,7 @@ export component AppWindow inherits Window {
             font-size: 10px;
             color: #888888;
             wrap: word-wrap;
+        }
         }
     }
 }

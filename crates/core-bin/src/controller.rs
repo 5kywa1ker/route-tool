@@ -14,8 +14,8 @@ use tracing::{error, info, warn};
 use core_lib::health_monitor::{run_loop, HealthCtx, HealthParams};
 use core_lib::switch_engine::SwitchStrategy;
 use core_lib::{
-    AdapterSnapshot, AppConfig, BypassTarget, CoreError, HealthEvent, Result, RuntimeState,
-    SwitchHandle, SwitchMode,
+    AdapterSnapshot, AppConfig, BypassTarget, CoreError, HealthEvent, HealthStatus, Result,
+    RuntimeState, SwitchHandle, SwitchMode,
 };
 use core_win::adapter_reconfig::AdapterReconfigStrategy;
 use core_win::route_overlay::RouteOverlayStrategy;
@@ -143,6 +143,14 @@ impl Controller {
             // 预期直连：清理残留叠加路由 / 孤儿快照（崩溃或禁用失败可能遗留）。
             let cfg = self.config.read().await.clone();
             self.cleanup_dirty_state(&cfg).await;
+            // 直连态健康必须是 Idle，否则 UI 托盘图标/tooltip 会残留
+            // Fallback/Degraded 等陈旧状态（与 mark_disabled 同一类 bug）。
+            if rs.health != HealthStatus::Idle {
+                let mut w = self.runtime.write().await;
+                w.health = HealthStatus::Idle;
+                w.last_updated = chrono::Utc::now();
+                let _ = self.store.save_runtime(&w.clone());
+            }
             info!("reconcile: expected disabled; no dirty state assumed");
             return Ok(());
         }
@@ -275,6 +283,9 @@ impl Controller {
         let mut rs = self.runtime.write().await;
         rs.is_enabled = false;
         rs.current_mode = None;
+        // 禁用后健康状态必须回到 Idle：否则 UI 侧的托盘图标/tooltip 仍按残留的
+        // Healthy/Degraded 显示成"旁路由生效"（历史 bug：禁用后图标不变灰）。
+        rs.health = HealthStatus::Idle;
         rs.last_updated = chrono::Utc::now();
         self.store.save_runtime(&rs.clone())?;
         Ok(())
