@@ -1,18 +1,17 @@
-// 首次配置向导 + 状态面板（单窗口简化实现）。
+// RouteTool 设置窗口 —— Windows 11 Fluent 风格布局。
 
-import { Button, ComboBox, LineEdit, SpinBox, CheckBox, GroupBox, GridBox } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, SpinBox, CheckBox, GridBox } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
     title: "RouteTool";
-    // 标题栏 / 任务栏窗口图标（winit 后端会从这里取）。
     icon: @image-url("../../../assets/app.png");
-    preferred-width: 460px;
-    preferred-height: 470px;
-    min-width: 420px;
-    min-height: 420px;
+    preferred-width: 480px;
+    preferred-height: 560px;
+    min-width: 440px;
+    min-height: 500px;
 
     // 用户可编辑的控件属性一律用 in-out + 双向绑定（<=>）：
-    // 单向绑定会让 Rust 侧属性与控件实际状态失同步（选择/输入回退、读到旧值）。
+    // 单向绑定会让 Rust 侧属性与控件实际状态失同步。
     in property <string> status-text: "未连接到核心服务";
     in property <bool> is-enabled: false;
     in property <bool> is-fallback: false;
@@ -28,7 +27,6 @@ export component AppWindow inherits Window {
     in-out property <bool> notifications: true;
     in property <string> test-result: "";
     in property <string> config-error: "";
-    in property <bool> has-config: false;
 
     callback toggle-bypass();
     callback test-connectivity();
@@ -36,21 +34,59 @@ export component AppWindow inherits Window {
     callback open-logs();
     callback adapter-changed(int);
 
-    VerticalLayout {
-        padding: 12px;
-        spacing: 8px;
+    // 状态语义色：绿=旁路由生效，红=异常回退，灰=直连/未连接。
+    property <color> status-color: root.is-fallback ? #c42b1c
+        : (root.is-enabled ? #0f7b0f : #5d5d5d);
 
-        GroupBox {
-            title: "状态";
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        // ---- 标题区 ----
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: center;
+            Text {
+                text: "RouteTool";
+                font-size: 22px;
+                font-weight: 600;
+                color: #1a1a1a;
+            }
+            Text {
+                text: "旁路由切换";
+                font-size: 12px;
+                color: #888888;
+                vertical-alignment: center;
+            }
+        }
+
+        // ---- 状态卡片 ----
+        Rectangle {
+            border-radius: 8px;
+            background: #f5f5f5;
+            border-width: 1px;
+            border-color: #e6e6e6;
             VerticalLayout {
-                spacing: 6px;
-                Text {
-                    text: root.status-text;
-                    font-size: 13px;
-                    color: root.is-fallback ? #d32f2f : (root.is-enabled ? #2e7d32 : #757575);
-                }
+                padding: 14px;
+                spacing: 10px;
                 HorizontalLayout {
                     spacing: 8px;
+                    alignment: center;
+                    Rectangle {
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: root.status-color;
+                    }
+                    Text {
+                        text: root.status-text;
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: #1a1a1a;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
                     Button {
                         text: root.is-enabled ? "禁用旁路由" : "启用旁路由";
                         primary: true;
@@ -64,79 +100,135 @@ export component AppWindow inherits Window {
                 if root.test-result != "": Text {
                     text: root.test-result;
                     font-size: 11px;
-                    color: #555;
+                    color: #666666;
                 }
             }
         }
 
-        GroupBox {
-            title: "配置";
+        // ---- 配置卡片 ----
+        Rectangle {
+            border-radius: 8px;
+            background: #f5f5f5;
+            border-width: 1px;
+            border-color: #e6e6e6;
             VerticalLayout {
-                spacing: 6px;
-                GridBox {
-                    spacing: 6px;
-                    Row {
-                        Text { text: "网卡:"; vertical-alignment: center; }
-                        ComboBox {
-                            model: root.adapter-names;
-                            current-index <=> root.adapter-index;
-                            selected => { root.adapter-changed(self.current-index); }
-                        }
+                padding: 14px;
+                spacing: 10px;
+                Text {
+                    text: "配置";
+                    font-size: 15px;
+                    font-weight: 600;
+                    color: #1a1a1a;
+                }
+
+                // 网卡
+                VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "网卡";
+                        font-size: 12px;
+                        color: #5d5d5d;
                     }
-                    Row {
-                        Text { text: "旁路由 IP:"; vertical-alignment: center; }
-                        LineEdit {
-                            text <=> root.bypass-ip-text;
-                            placeholder-text: "例如 192.168.2.1";
-                        }
-                    }
-                    Row {
-                        Text { text: "切换模式:"; vertical-alignment: center; }
-                        ComboBox {
-                            model: ["路由叠加（推荐）", "网卡直改"];
-                            current-index <=> root.mode-index;
-                        }
+                    ComboBox {
+                        model: root.adapter-names;
+                        current-index <=> root.adapter-index;
+                        selected => { root.adapter-changed(self.current-index); }
                     }
                 }
-                // 网卡直改模式独有配置：子网掩码 + DNS（路由叠加模式下隐藏）。
-                if root.mode-index == 1: GridBox {
-                    spacing: 6px;
-                    Row {
-                        Text { text: "子网掩码:"; vertical-alignment: center; }
+
+                // 旁路由 IP
+                VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "旁路由 IP";
+                        font-size: 12px;
+                        color: #5d5d5d;
+                    }
+                    LineEdit {
+                        text <=> root.bypass-ip-text;
+                        placeholder-text: "例如 192.168.2.1";
+                    }
+                }
+
+                // 切换模式
+                VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "切换模式";
+                        font-size: 12px;
+                        color: #5d5d5d;
+                    }
+                    ComboBox {
+                        model: ["路由叠加（推荐）", "网卡直改"];
+                        current-index <=> root.mode-index;
+                    }
+                }
+
+                // 网卡直改模式独有配置
+                if root.mode-index == 1: VerticalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "子网掩码";
+                            font-size: 12px;
+                            color: #5d5d5d;
+                        }
                         LineEdit {
                             text <=> root.mask-text;
                             placeholder-text: "255.255.255.0";
                         }
                     }
-                    Row {
-                        Text { text: "DNS:"; vertical-alignment: center; }
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "DNS";
+                            font-size: 12px;
+                            color: #5d5d5d;
+                        }
                         LineEdit {
                             text <=> root.dns-text;
                             placeholder-text: "留空则使用旁路由 IP";
                         }
                     }
                 }
+
+                // 健康检测参数（两列）
                 GridBox {
-                    spacing: 6px;
+                    spacing: 10px;
                     Row {
-                        Text { text: "检测间隔(秒):"; vertical-alignment: center; }
-                        SpinBox {
-                            minimum: 1;
-                            maximum: 60;
-                            value <=> root.interval-secs;
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: "检测间隔（秒）";
+                                font-size: 12px;
+                                color: #5d5d5d;
+                            }
+                            SpinBox {
+                                minimum: 1;
+                                maximum: 60;
+                                value <=> root.interval-secs;
+                            }
                         }
-                    }
-                    Row {
-                        Text { text: "失败阈值:"; vertical-alignment: center; }
-                        SpinBox {
-                            minimum: 1;
-                            maximum: 10;
-                            value <=> root.failure-threshold;
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: "失败阈值";
+                                font-size: 12px;
+                                color: #5d5d5d;
+                            }
+                            SpinBox {
+                                minimum: 1;
+                                maximum: 10;
+                                value <=> root.failure-threshold;
+                            }
                         }
                     }
                 }
+
+                // 开关项
                 VerticalLayout {
-                    spacing: 2px;
+                    spacing: 8px;
                     CheckBox {
                         text: "旁路由恢复后自动重新启用";
                         checked <=> root.auto-reenable;
@@ -149,14 +241,16 @@ export component AppWindow inherits Window {
             }
         }
 
+        // 错误提示
         if root.config-error != "": Text {
             text: root.config-error;
             font-size: 11px;
-            color: #d32f2f;
+            color: #c42b1c;
         }
 
+        // 底部操作
         HorizontalLayout {
-            spacing: 8px;
+            spacing: 10px;
             Button {
                 text: "保存配置";
                 clicked => { root.save-config(); }
@@ -167,10 +261,11 @@ export component AppWindow inherits Window {
             }
         }
 
+        // 说明文字
         Text {
-            text: "说明：路由叠加 = 添加 0.0.0.0/1 + 128.0.0.0/1 两条路由覆盖默认路由，不动网卡配置；\n网卡直改 = 直接修改网卡的网关/DNS/子网掩码，需备份恢复，风险略高。";
+            text: "路由叠加：添加 0.0.0.0/1 + 128.0.0.0/1 两条路由覆盖默认路由，不动网卡配置。\n网卡直改：直接修改网卡的网关 / DNS / 子网掩码，需备份恢复，风险略高。";
             font-size: 10px;
-            color: #888;
+            color: #888888;
             wrap: word-wrap;
         }
     }

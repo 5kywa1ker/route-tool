@@ -5,8 +5,9 @@
   app.ico            多尺寸 ICO（exe 资源图标 + Inno Setup 安装图标）
   tray_<state>.rgba  32x32 原始 RGBA（托盘三态，运行时 include_bytes! 直接加载，无需解码依赖）
 
-设计：圆角方形蓝色底 + 白色「一路进、两路出」的路由分叉符号
+设计：圆角方形渐变蓝底 + 白色「一路进、两路出」的路由分叉符号
 （左侧节点 = 本机，右侧上下两支 = 直连 / 旁路由），保证缩到 16x16 仍可辨识。
+渐变自带明暗过渡，贴近 Win11 Fluent 图标的质感。
 
 用法：python scripts/gen_icons.py
 """
@@ -17,7 +18,9 @@ import os
 from PIL import Image, ImageDraw
 
 S = 256  # 设计画布
-BG = (0x16, 0x68, 0xD6, 255)  # 蓝底
+# 渐变底：左上亮蓝 -> 右下深蓝（Win11 Fluent 质感）
+BG_TL = (0x3E, 0x7B, 0xFF, 255)
+BG_BR = (0x0A, 0x47, 0xC8, 255)
 FG = (255, 255, 255, 255)  # 白色符号
 
 # 托盘三态底色（直连=灰 / 旁路由=绿 / 回退=红）
@@ -53,14 +56,47 @@ def _arrow(d, a, b, w, color, head=52, hw=56):
     )
 
 
-def render(bg, size=S):
-    """在 size x size 画布上绘制一枚图标（RGBA）。"""
-    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+def _gradient_rect(size, pad, radius, c_tl, c_br):
+    """圆角方形 + 对角渐变（左上亮 -> 右下深），返回 RGBA Image。"""
+    w = h = size
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    px = img.load()
+    denom = max(w + h, 1)
+    dr = c_br[0] - c_tl[0]
+    dg = c_br[1] - c_tl[1]
+    db = c_br[2] - c_tl[2]
+    for y in range(h):
+        for x in range(w):
+            t = (x + y) / denom
+            px[x, y] = (
+                int(c_tl[0] + dr * t),
+                int(c_tl[1] + dg * t),
+                int(c_tl[2] + db * t),
+                255,
+            )
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [pad, pad, w - pad - 1, h - pad - 1], radius=radius, fill=255
+    )
+    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    out.paste(img, (0, 0), mask)
+    return out
 
-    # 圆角方形底
+
+def render(bg, size=S, gradient=False):
+    """在 size x size 画布上绘制一枚图标（RGBA）。
+    gradient=True 时用渐变底（主图标），否则用纯色 bg（托盘三态）。
+    """
     pad, radius = 6, 60
-    d.rounded_rectangle([pad, pad, S - pad - 1, S - pad - 1], radius=radius, fill=bg)
+
+    if gradient:
+        img = _gradient_rect(S, pad, radius, BG_TL, BG_BR)
+    else:
+        img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        ImageDraw.Draw(img).rounded_rectangle(
+            [pad, pad, S - pad - 1, S - pad - 1], radius=radius, fill=bg
+        )
+    d = ImageDraw.Draw(img)
 
     # 左侧本机节点
     cx = cy = 128.0
@@ -84,7 +120,7 @@ def render(bg, size=S):
 def main():
     os.makedirs(OUT, exist_ok=True)
 
-    master = render(BG, S)
+    master = render(BG_TL, S, gradient=True)
     master.save(os.path.join(OUT, "app.png"))
 
     # ICO：Windows 资源与安装包常用尺寸

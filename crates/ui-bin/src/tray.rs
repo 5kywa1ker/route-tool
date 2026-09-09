@@ -31,6 +31,7 @@ pub enum TrayState {
 /// 系统托盘。
 pub struct Tray {
     _tray: TrayIcon,
+    toggle_item: MenuItem,
     toggle_id: tray_icon::menu::MenuId,
     settings_id: tray_icon::menu::MenuId,
     logs_id: tray_icon::menu::MenuId,
@@ -53,8 +54,8 @@ impl StaticTray {
         self.0.poll_event()
     }
 
-    pub fn update_state(&self, state: TrayState) {
-        self.0.update_state(state)
+    pub fn update_state(&self, state: TrayState, enabled: bool) {
+        self.0.update_state(state, enabled)
     }
 
     pub fn hide_icon(&self) {
@@ -98,6 +99,7 @@ impl Tray {
 
         Ok(Self {
             _tray: tray,
+            toggle_item,
             toggle_id,
             settings_id,
             logs_id,
@@ -129,7 +131,7 @@ impl Tray {
     }
 
     /// 更新托盘图标与提示文案（仅 UI 线程调用）。
-    pub fn update_state(&self, state: TrayState) {
+    pub fn update_state(&self, state: TrayState, enabled: bool) {
         let (icon, tip) = match state {
             TrayState::Direct => (make_icon(TrayState::Direct).ok(), "RouteTool - 直连"),
             TrayState::Bypass => (make_icon(TrayState::Bypass).ok(), "RouteTool - 旁路由生效"),
@@ -142,6 +144,12 @@ impl Tray {
             let _ = self._tray.set_icon(Some(icon));
         }
         let _ = self._tray.set_tooltip(Some(tip));
+        // 菜单第一项随启用状态切换文字（README §5.2：启用/禁用旁路由）。
+        self.toggle_item.set_text(if enabled {
+            "禁用旁路由"
+        } else {
+            "启用旁路由"
+        });
     }
 }
 

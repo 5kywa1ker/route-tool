@@ -11,3 +11,6 @@ installer/Output/
 # IDE
 .vscode/
 .idea/
+
+# WorkBuddy project data (not part of the project)
+.workbuddy/

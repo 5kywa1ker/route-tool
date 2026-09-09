@@ -96,7 +96,6 @@ fn apply_config_to_ui(app: &AppWindow, cfg: &AppConfig) {
     app.set_failure_threshold(cfg.failure_threshold as i32);
     app.set_auto_reenable(cfg.auto_reenable_after_recovery);
     app.set_notifications(cfg.notifications_enabled);
-    app.set_has_config(true);
     app.set_mask_text(
         cfg.subnet_mask
             .map(|m| m.to_string())
@@ -450,7 +449,7 @@ fn main() -> anyhow::Result<()> {
         let app_weak = app.as_weak();
         let timer = slint::Timer::default();
         let last_fallback = Arc::new(Mutex::new(false));
-        let last_tray_state = Arc::new(Mutex::new(tray::TrayState::Direct));
+        let last_tray_state = Arc::new(Mutex::new((tray::TrayState::Direct, false)));
 
         timer.start(
             slint::TimerMode::Repeated,
@@ -575,19 +574,23 @@ fn main() -> anyhow::Result<()> {
                     };
                     let is_enabled = rs.is_enabled;
 
-                    // 回退 Toast（只在状态从非回退变为回退时弹）。
+                    // 回退 Toast（只在状态从非回退变为回退、且用户开启通知时弹）。
+                    let notifications_enabled = {
+                        let st = state.lock().await;
+                        st.config.notifications_enabled
+                    };
                     let mut lf = last_fallback.lock().await;
-                    if is_fb && !*lf {
+                    if is_fb && !*lf && notifications_enabled {
                         notify::show_toast("旁路由异常", "旁路由异常，已自动切回直连");
                     }
                     *lf = is_fb;
                     drop(lf);
 
-                    // 托盘状态只在变化时更新（重绘图标开销大）。
+                    // 托盘在图标状态变化、或启用状态变化（菜单文字切换）时刷新。
                     let tray_changed = {
                         let mut lts = last_tray_state.lock().await;
-                        let changed = *lts != tray_state;
-                        *lts = tray_state;
+                        let changed = *lts != (tray_state, is_enabled);
+                        *lts = (tray_state, is_enabled);
                         changed
                     };
                     let _ = slint::invoke_from_event_loop(move || {
@@ -598,7 +601,7 @@ fn main() -> anyhow::Result<()> {
                         }
                         if tray_changed {
                             if let Some(t) = tray::SHARED_TRAY.get() {
-                                t.update_state(tray_state);
+                                t.update_state(tray_state, is_enabled);
                             }
                         }
                     });
