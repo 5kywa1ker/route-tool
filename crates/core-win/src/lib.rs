@@ -5,6 +5,7 @@
 
 pub mod adapter_reconfig;
 pub mod adapters;
+pub mod dhcp;
 pub mod icmp;
 pub mod inspector;
 pub mod netsh;

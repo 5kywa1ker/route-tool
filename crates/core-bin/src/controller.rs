@@ -20,6 +20,12 @@ use core_lib::{
 use core_win::adapter_reconfig::AdapterReconfigStrategy;
 use core_win::route_overlay::RouteOverlayStrategy;
 
+/// 网卡直改模式下两次"重建"之间的最小间隔。
+///
+/// 重建 = 重放一次 `netsh set address static`，等于把网卡重置一遍（会断网一瞬）。
+/// 历史上健康检测每个周期（10s）都重放一次，导致网卡被周期性重置。
+const RECONFIG_REBUILD_COOLDOWN: Duration = Duration::from_secs(60);
+
 /// 顶层控制器。
 pub struct Controller {
     pub config: Arc<RwLock<AppConfig>>,
@@ -203,9 +209,19 @@ impl Controller {
                         .unwrap_or(false);
                     if !gw_ok {
                         warn!("reconcile: adapter state != expected; re-applying");
-                        let h = self.reconfig.enable(&target).await?;
-                        *self.handle.lock().await = Some(h);
-                        self.mark_enabled(mode).await?;
+                        match self.reconfig.enable(&target).await {
+                            Ok(h) => {
+                                *self.handle.lock().await = Some(h);
+                                self.mark_enabled(mode).await?;
+                            }
+                            // 网卡未连接时直改必然失败（见
+                            // AdapterReconfigStrategy::enable 的注释）：这不是配置
+                            // 错误，保持"预期启用"并交给健康检测在条件具备时处理，
+                            // 不让服务启动的一致性校验直接失败。
+                            Err(e) => {
+                                warn!("reconcile: 重新应用网卡直改失败（网卡可能未连接）: {e}")
+                            }
+                        }
                     }
                 } else {
                     warn!("reconcile: reconfig enabled but no snapshot; falling back to direct");
@@ -369,7 +385,7 @@ impl Controller {
 
         // DHCP 状态：读注册表 EnableDHCP（GUID 是子项名，无编码歧义）。
         // 查询失败按静态处理（恢复时重放当前参数）。
-        let is_dhcp = crate::netcheck::query_dhcp_enabled(&a.id).unwrap_or(false);
+        let is_dhcp = core_win::dhcp::query_dhcp_enabled(&a.id).unwrap_or(false);
 
         // 前缀长度优先取系统真实值，缺项时按 /24 兜底。
         let prefixes: Vec<u8> = if a.ipv4_prefixes.len() == a.ipv4.len() {
@@ -401,6 +417,7 @@ impl Controller {
             event_tx: self.event_tx.clone(),
             store: self.store.clone(),
             generation: self.health_generation.clone(),
+            last_rebuild: Arc::new(Mutex::new(None)),
         };
         let params = HealthParams {
             mode: cfg.switch_mode,
@@ -408,6 +425,12 @@ impl Controller {
             interval: Duration::from_secs(u64::from(cfg.health_check_interval_secs.max(1))),
             threshold: cfg.failure_threshold.max(1),
             auto_reenable: cfg.auto_reenable_after_recovery,
+            // 直改重放一次就是重置一次网卡，必须冷却；路由叠加只是补两条
+            // 路由，重放无害，不设冷却。
+            rebuild_cooldown: match cfg.switch_mode {
+                SwitchMode::RouteOverlay => Duration::ZERO,
+                SwitchMode::AdapterReconfig => RECONFIG_REBUILD_COOLDOWN,
+            },
             generation: self.health_generation.load(Ordering::SeqCst),
         };
 

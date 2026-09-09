@@ -8,7 +8,6 @@
 
 mod controller;
 mod ipc_server;
-mod netcheck;
 mod service_host;
 mod state;
 

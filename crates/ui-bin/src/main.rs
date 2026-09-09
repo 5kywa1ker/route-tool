@@ -115,6 +115,23 @@ fn format_ips(ips: &[std::net::IpAddr]) -> String {
         .join(", ")
 }
 
+/// 网卡下拉框的显示名：未连接的网卡加「（未连接）」后缀。
+///
+/// 直改模式下对未连接（没插网线 / Wi-Fi 未关联）的网卡执行 netsh 静态化会
+/// "退出码 0 但实际不生效"，用户完全无从判断——在下拉项上直接标出来，
+/// 避免选到一块正在离线的网卡。
+fn adapter_display_names(list: &[AdapterInfo]) -> Vec<SharedString> {
+    list.iter()
+        .map(|a| {
+            if a.is_connected {
+                a.name.clone().into()
+            } else {
+                format!("{}（未连接）", a.name).into()
+            }
+        })
+        .collect()
+}
+
 /// 把选中的网卡信息同步到首页展示字段。
 fn update_adapter_info_display(app: &AppWindow, adapters: &[AdapterInfo], adapter_id: &str) {
     if let Some(a) = adapters.iter().find(|a| a.id == adapter_id) {
@@ -743,8 +760,7 @@ fn main() -> anyhow::Result<()> {
                         };
                         if let (Some(cfg), Some(list)) = (cfg, adapter_list) {
                             let sel = list.iter().position(|a| a.id == cfg.adapter_id);
-                            let names: Vec<SharedString> =
-                                list.iter().map(|a| a.name.clone().into()).collect();
+                            let names = adapter_display_names(&list);
                             let adapter_id = cfg.adapter_id.clone();
                             let app_weak = app_weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {

@@ -27,6 +27,18 @@ pub trait SwitchStrategy: Send + Sync {
     /// 查询句柄对应的旁路由在当前系统中是否仍处于生效状态。
     async fn is_active(&self, handle: &SwitchHandle) -> Result<bool>;
 
+    /// 当前是否**值得**重放 [`SwitchStrategy::enable`] 来重建旁路由。
+    ///
+    /// 与 `is_active` 的区别：`is_active == false` 只说明"此刻没生效"，并不代表
+    /// 重放 enable 有意义。典型反例是网卡直改模式下目标网卡未连接——此时每次
+    /// 重放都会把网卡重置一遍（用户侧表现为周期性断网），却永远不会生效。
+    /// 返回 false 时健康检测应跳过重建，而不是每个周期重放一次。
+    ///
+    /// 默认实现返回 true（重放是无害的），仅对"重放有副作用"的策略需要覆盖。
+    async fn can_rebuild(&self, _target: &BypassTarget) -> Result<bool> {
+        Ok(true)
+    }
+
     /// 启动时一致性校验：根据上次预期状态与实际状态比对，修正脏状态。
     async fn reconcile_on_startup(&self) -> Result<ReconcileAction>;
 }

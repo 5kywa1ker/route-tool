@@ -6,7 +6,7 @@
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::{error, info, warn};
@@ -48,6 +48,8 @@ pub struct HealthCtx {
     pub store: StateStore,
     /// 共享世代计数器：Controller 每次 stop 递增，旧世代循环停止产生副作用。
     pub generation: Arc<AtomicU64>,
+    /// 上次重建（重放 enable）的时刻，用于冷却。
+    pub last_rebuild: Arc<Mutex<Option<Instant>>>,
 }
 
 /// 健康检测参数（从 AppConfig 派生的快照）。
@@ -58,6 +60,9 @@ pub struct HealthParams {
     pub interval: Duration,
     pub threshold: u32,
     pub auto_reenable: bool,
+    /// 两次重建之间的最小间隔。重放 enable **有副作用**的策略（网卡直改会
+    /// 重置网卡）需要设置；纯路由叠加传 [`Duration::ZERO`]（重放无害）。
+    pub rebuild_cooldown: Duration,
     /// 本循环的世代号（与 ctx.generation 不一致说明已被新循环取代）。
     pub generation: u64,
 }
@@ -239,6 +244,11 @@ async fn fallback(ctx: &HealthCtx, params: &HealthParams, state: &mut HealthStat
 }
 
 /// 校验句柄对应状态仍生效；若不生效则重建（适配网卡切换/睡眠唤醒）。
+///
+/// 两道护栏，避免"每周期重放一次 enable"：
+/// 1. `can_rebuild == false` 直接跳过——典型是网卡直改模式下目标网卡未连接，
+///    重放 netsh 只会把网卡重置一次（周期性断网）且永远不生效。
+/// 2. 冷却窗口 `rebuild_cooldown`——即使值得重建，也不允许每个周期都来一次。
 async fn ensure_active(ctx: &HealthCtx, params: &HealthParams) {
     let active = {
         let guard = ctx.handle.lock().await;
@@ -253,12 +263,41 @@ async fn ensure_active(ctx: &HealthCtx, params: &HealthParams) {
             None => false,
         }
     };
+    if active {
+        return;
+    }
 
-    if !active {
-        info!("bypass no longer active (iface changed); re-enabling");
-        if let Err(e) = reenable(ctx, params).await {
-            warn!("rebuild failed: {e}");
+    match ctx.strategy.can_rebuild(&params.target).await {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!("bypass 未生效，但当前不具备重建条件（如网卡未连接），本次跳过重放");
+            return;
         }
+        Err(e) => {
+            warn!("can_rebuild 检查失败: {e}；跳过本次重放");
+            return;
+        }
+    }
+
+    {
+        let mut guard = ctx.last_rebuild.lock().await;
+        let now = Instant::now();
+        if let Some(last) = *guard {
+            if now.duration_since(last) < params.rebuild_cooldown {
+                info!(
+                    "bypass 未生效，但距上次重建 {:?} < 冷却 {:?}，本次跳过重放",
+                    now.duration_since(last),
+                    params.rebuild_cooldown
+                );
+                return;
+            }
+        }
+        *guard = Some(now);
+    }
+
+    info!("bypass no longer active (iface changed); re-enabling");
+    if let Err(e) = reenable(ctx, params).await {
+        warn!("rebuild failed: {e}");
     }
 }
 
@@ -331,7 +370,7 @@ mod tests {
     use super::*;
     use crate::net_inspector::NetInspector;
     use crate::state_store::StateStore;
-    use crate::switch_engine::SwitchStrategy;
+    use crate::switch_engine::{ReconcileAction, SwitchStrategy};
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -410,6 +449,55 @@ mod tests {
         }
     }
 
+    /// 可开关 is_active / can_rebuild 的 mock 策略（护栏测试用）。
+    struct GatedStrategy {
+        active: AtomicU32,
+        can: AtomicU32,
+        enable_count: AtomicU32,
+    }
+
+    impl GatedStrategy {
+        fn new(active: bool, can: bool) -> Self {
+            Self {
+                active: AtomicU32::new(u32::from(active)),
+                can: AtomicU32::new(u32::from(can)),
+                enable_count: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SwitchStrategy for GatedStrategy {
+        async fn enable(&self, _target: &BypassTarget) -> crate::Result<SwitchHandle> {
+            self.enable_count.fetch_add(1, Ordering::SeqCst);
+            Ok(SwitchHandle {
+                mode: SwitchMode::AdapterReconfig,
+                if_index: None,
+                if_luid: None,
+                destination_prefix: None,
+                next_hop: Some("10.0.0.1".parse().unwrap()),
+                adapter_id: Some("guid".into()),
+                extra_routes: vec![],
+            })
+        }
+
+        async fn disable(&self, _handle: &SwitchHandle) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn is_active(&self, _handle: &SwitchHandle) -> crate::Result<bool> {
+            Ok(self.active.load(Ordering::SeqCst) == 1)
+        }
+
+        async fn can_rebuild(&self, _target: &BypassTarget) -> crate::Result<bool> {
+            Ok(self.can.load(Ordering::SeqCst) == 1)
+        }
+
+        async fn reconcile_on_startup(&self) -> crate::Result<ReconcileAction> {
+            Ok(ReconcileAction::NoAction)
+        }
+    }
+
     fn test_ctx(
         inspector: Arc<dyn NetInspector>,
         strategy: Arc<dyn SwitchStrategy>,
@@ -445,6 +533,7 @@ mod tests {
             event_tx,
             store,
             generation: Arc::new(AtomicU64::new(0)),
+            last_rebuild: Arc::new(Mutex::new(None)),
         };
         (ctx, event_rx)
     }
@@ -462,6 +551,7 @@ mod tests {
             interval: Duration::from_secs(3600), // 手动 tick，不受定时影响
             threshold,
             auto_reenable,
+            rebuild_cooldown: Duration::ZERO,
             generation: 0,
         }
     }
@@ -666,5 +756,67 @@ mod tests {
 
         // 落盘状态不被旧世代污染：runtime_state.json 不存在（从未写入）。
         assert!(!ctx.store.base_dir().join("runtime_state.json").exists());
+    }
+
+    /// 策略明确表示"不值得重建"时，健康检测不得重放 enable。
+    ///
+    /// 对应网卡直改 + 目标网卡未连接：重放 netsh 只会把网卡重置一次（断网
+    /// 抖动）且永远不生效，历史上因此每 10 秒重置一次网卡。
+    #[tokio::test]
+    async fn no_rebuild_when_strategy_says_unavailable() {
+        let strategy = Arc::new(GatedStrategy::new(false, false));
+        let (ctx, _rx) = test_ctx(
+            Arc::new(MockInspector {
+                fail_first: AtomicU32::new(0),
+            }),
+            strategy.clone(),
+        );
+        let p = params(3, false);
+        let mut state = HealthState::Healthy;
+
+        for _ in 0..5 {
+            tick(&ctx, &p, &mut state).await;
+        }
+        assert_eq!(strategy.enable_count.load(Ordering::SeqCst), 0);
+    }
+
+    /// 值得重建时也要受冷却窗口约束：多个周期里最多重建一次。
+    #[tokio::test]
+    async fn rebuild_respects_cooldown() {
+        let strategy = Arc::new(GatedStrategy::new(false, true));
+        let (ctx, _rx) = test_ctx(
+            Arc::new(MockInspector {
+                fail_first: AtomicU32::new(0),
+            }),
+            strategy.clone(),
+        );
+        let mut p = params(3, false);
+        p.rebuild_cooldown = Duration::from_secs(3600);
+        let mut state = HealthState::Healthy;
+
+        for _ in 0..5 {
+            tick(&ctx, &p, &mut state).await;
+        }
+        assert_eq!(strategy.enable_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// 冷却为零（路由叠加）时不受限制，保持原有"每个周期都能补路由"的行为。
+    #[tokio::test]
+    async fn zero_cooldown_allows_rebuild_every_tick() {
+        let strategy = Arc::new(GatedStrategy::new(false, true));
+        let (ctx, _rx) = test_ctx(
+            Arc::new(MockInspector {
+                fail_first: AtomicU32::new(0),
+            }),
+            strategy.clone(),
+        );
+        let mut p = params(3, false);
+        p.rebuild_cooldown = Duration::ZERO;
+        let mut state = HealthState::Healthy;
+
+        for _ in 0..3 {
+            tick(&ctx, &p, &mut state).await;
+        }
+        assert_eq!(strategy.enable_count.load(Ordering::SeqCst), 3);
     }
 }

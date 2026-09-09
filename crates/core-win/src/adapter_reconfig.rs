@@ -59,7 +59,10 @@ impl AdapterReconfigStrategy {
             .ok_or_else(|| CoreError::Network(format!("网卡 {} 已不存在", snap.adapter_id)))?;
 
         if snap.is_dhcp_enabled {
-            netsh::enable_dhcp(&name).await?;
+            // 已是 DHCP 时 netsh 会返回非 0（"已在此接口上启用 DHCP"），
+            // ensure_dhcp 按注册表判定并跳过，避免整段恢复被误判失败
+            // （失败会导致快照不清理、网卡一直留在旁路由网关上）。
+            netsh::ensure_dhcp(&name, &snap.adapter_id).await?;
             netsh::reset_dns(&name).await?;
         } else {
             // 恢复原静态参数（掩码取快照记录的真实前缀，缺项按 /24）。
@@ -78,7 +81,7 @@ impl AdapterReconfigStrategy {
                     "快照缺少 IP/网关（adapter {}），回退为 DHCP 恢复",
                     snap.adapter_id
                 );
-                netsh::enable_dhcp(&name).await?;
+                netsh::ensure_dhcp(&name, &snap.adapter_id).await?;
                 netsh::reset_dns(&name).await?;
                 info!(
                     "adapter {} restored as dhcp (incomplete snapshot)",
@@ -130,6 +133,19 @@ impl SwitchStrategy for AdapterReconfigStrategy {
             .iter()
             .find(|a| a.id == target.adapter_id)
             .ok_or_else(|| CoreError::Network(format!("网卡 {} 不存在", target.adapter_id)))?;
+
+        // 关键前提：网卡必须处于已连接状态。
+        //
+        // 介质断开（没插网线 / Wi-Fi 未关联）的网卡上，`netsh set address static`
+        // 会返回退出码 0 但**完不成 DHCP→静态的切换**（注册表 EnableDHCP 仍为 1），
+        // 静态 IP/网关虽写入注册表也不生效，更不会产生 0.0.0.0/0 默认路由。
+        // 结果是"启用成功"却毫无效果，且 is_active 恒为 false，健康检测会
+        // 每个周期空转重设一次网卡。这里直接拦下并给出可操作的报错。
+        if !current.is_connected {
+            return Err(CoreError::Network(format!(
+                "网卡「{iface}」当前未连接（网线未插或 Wi-Fi 未连接），无法直改。请改用正在联网的网卡，或先接通此网卡"
+            )));
+        }
 
         // 要写死的静态 IP：优先取用户显式配置（static_ip），否则保留网卡当前 IP。
         //
@@ -231,6 +247,17 @@ impl SwitchStrategy for AdapterReconfigStrategy {
             Some(a) => Ok(a.is_connected && a.gateway.iter().any(|g| *g == expected_gw)),
             None => Ok(false),
         }
+    }
+
+    async fn can_rebuild(&self, target: &BypassTarget) -> Result<bool> {
+        // 网卡未连接时不重放：netsh 静态化在断开的网卡上完不成 DHCP→静态切换，
+        // 重放只会把网卡重置一次（断网抖动）却永远不生效。等它连上再说。
+        let list = adapters::list_adapters()
+            .map_err(|e| CoreError::Network(format!("枚举网卡失败: {e}")))?;
+        Ok(list
+            .iter()
+            .find(|a| a.id == target.adapter_id)
+            .is_some_and(|a| a.is_connected))
     }
 
     async fn reconcile_on_startup(&self) -> Result<ReconcileAction> {
