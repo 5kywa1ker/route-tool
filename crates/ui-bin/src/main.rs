@@ -169,11 +169,13 @@ fn update_adapter_info_display(app: &AppWindow, adapters: &[AdapterInfo], adapte
         } else {
             format_ips(&a.dns)
         };
+        app.set_selected_adapter_name(a.name.clone().into());
         app.set_selected_adapter_ip(ip.into());
         app.set_selected_adapter_mask(mask.into());
         app.set_selected_adapter_gateway(gw.into());
         app.set_selected_adapter_dns(dns.into());
     } else {
+        app.set_selected_adapter_name("--".into());
         app.set_selected_adapter_ip("--".into());
         app.set_selected_adapter_mask("--".into());
         app.set_selected_adapter_gateway("--".into());
@@ -864,16 +866,6 @@ fn main() -> anyhow::Result<()> {
                     let is_enabled = rs.is_enabled;
 
                     let latency = rs.last_latency_ms.map(|v| v as i32).unwrap_or(-1);
-                    let last_check = if rs.last_updated.timestamp() > 0 {
-                        let elapsed = (chrono::Utc::now() - rs.last_updated).num_seconds();
-                        if elapsed < 60 {
-                            "刚刚".to_string()
-                        } else {
-                            format!("{}分钟前", elapsed / 60)
-                        }
-                    } else {
-                        "--".to_string()
-                    };
 
                     let notifications_enabled = {
                         let st = state.lock().await;
@@ -898,7 +890,6 @@ fn main() -> anyhow::Result<()> {
                             app.set_is_enabled(is_enabled);
                             app.set_is_fallback(is_fb);
                             app.set_latency_ms(latency);
-                            app.set_last_check_text(last_check.into());
                         }
                         if tray_changed {
                             if let Some(t) = tray::SHARED_TRAY.get() {

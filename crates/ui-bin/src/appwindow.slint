@@ -227,8 +227,33 @@ component ModeCard {
     }
 }
 
+// 「旁路由 IP」行：第二个 Text 默认 horizontal-stretch=1（Slint 行为），
+// 会把 IP 顶到行尾。固定 horizontal-stretch: 0 让 IP 紧跟在「旁路由 IP：」后面。
+component KeyValueRow {
+    in property <string> key;
+    in property <string> value;
+    in property <color> value-color: Theme.text-primary;
+
+    HorizontalLayout {
+        spacing: 6px;
+        Text {
+            text: root.key;
+            font-size: 12px;
+            color: Theme.text-secondary;
+        }
+        Text {
+            text: root.value;
+            font-size: 12px;
+            font-weight: 600;
+            color: root.value-color;
+            horizontal-stretch: 0;
+        }
+    }
+}
+
 component RouteOverlayCard {
     in property <string> bypass-ip;
+    in property <string> adapter-name;
 
     Rectangle {
         background: #ffffff;
@@ -275,20 +300,8 @@ component RouteOverlayCard {
                     }
                 }
             }
-            HorizontalLayout {
-                spacing: 6px;
-                Text {
-                    text: "旁路由 IP：";
-                    font-size: 12px;
-                    color: Theme.text-secondary;
-                }
-                Text {
-                    text: root.bypass-ip;
-                    font-size: 12px;
-                    font-weight: 600;
-                    color: Theme.text-primary;
-                }
-            }
+            KeyValueRow { key: "网卡"; value: root.adapter-name; }
+            KeyValueRow { key: "旁路由 IP"; value: root.bypass-ip; }
         }
     }
 }
@@ -298,6 +311,7 @@ component AdapterReconfigCard {
     in property <string> mask;
     in property <string> gateway;
     in property <string> dns;
+    in property <string> adapter-name;
 
     Rectangle {
         background: #ffffff;
@@ -344,7 +358,7 @@ component AdapterReconfigCard {
                     }
                 }
             }
-            // GridLayout 在 24 网格下自然形成 2×2，四项信息均匀铺开。
+            KeyValueRow { key: "网卡"; value: root.adapter-name; }
             GridLayout {
                 spacing: 14px;
                 InfoRow { label: "网卡 IP"; value: root.ip; col: 0; row: 0; }
@@ -406,13 +420,14 @@ component HomePage {
     in property <bool> is-enabled;
     in property <bool> is-fallback;
     in property <int> latency-ms;
-    in property <string> last-check-text;
+    in property <int> interval-secs;
     in property <int> mode-index;
     in property <string> bypass-ip-text;
     in property <string> adapter-ip;
     in property <string> adapter-mask;
     in property <string> adapter-gateway;
     in property <string> adapter-dns;
+    in property <string> adapter-name;
     callback toggle();
     callback switch-mode();
 
@@ -432,15 +447,21 @@ component HomePage {
                     HorizontalLayout {
                         spacing: 8px;
                         alignment: start;
-                        Rectangle {
-                            width: 10px;
-                            height: 10px;
-                            border-radius: 5px;
-                            background: root.status-color;
-                            drop-shadow-offset-x: 0;
-                            drop-shadow-offset-y: 0;
-                            drop-shadow-blur: 6px;
-                            drop-shadow-color: root.status-color;
+                        // 状态点上下居中：Slint 1.14 Rectangle 不支持
+                        // vertical-alignment，所以用 VerticalLayout 包一层
+                        // 让内层 alignment: center 生效。
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                border-radius: 5px;
+                                background: root.status-color;
+                                drop-shadow-offset-x: 0;
+                                drop-shadow-offset-y: 0;
+                                drop-shadow-blur: 6px;
+                                drop-shadow-color: root.status-color;
+                            }
                         }
                         VerticalLayout {
                             spacing: 2px;
@@ -481,10 +502,12 @@ component HomePage {
                             sub-value: root.is-enabled ? "检测中" : "";
                             horizontal-stretch: 1;
                         }
+                        // 「检测间隔」替代原「上次检测」：检测是自动跑的，不需要
+                        // 单独显示上一次检测时间；改为展示用户配置的检测周期。
                         StatItem {
-                            label: "上次检测";
-                            value: root.last-check-text;
-                            sub-value: "";
+                            label: "检测间隔";
+                            value: root.interval-secs + " 秒";
+                            sub-value: "自动检测";
                             horizontal-stretch: 1;
                         }
                     }
@@ -517,6 +540,7 @@ component HomePage {
 
                     if root.mode-index == 0: RouteOverlayCard {
                         bypass-ip: root.bypass-ip-text;
+                        adapter-name: root.adapter-name;
                     }
 
                     if root.mode-index == 1: AdapterReconfigCard {
@@ -524,6 +548,7 @@ component HomePage {
                         mask: root.adapter-mask;
                         gateway: root.adapter-gateway;
                         dns: root.adapter-dns;
+                        adapter-name: root.adapter-name;
                     }
                 }
             }
@@ -722,6 +747,9 @@ component ConfigPage {
 
 // LogRow 自适应高度：把单条日志 message 文本换行后整个行条按内容增高，
 // 避免原来固定 26px 高度遮住 wrap 文本的问题。
+//   - time/level 列用浅灰底突出「列」的概念，便于扫读；
+//   - message 用 vertical-alignment: top，多行时贴顶显示（默认 center 会让
+//     首行垂直方向居中，看起来不跟 time/level 列对齐）。
 component LogRow {
     in property <string> time;
     in property <string> level;
@@ -730,36 +758,54 @@ component LogRow {
 
     Rectangle {
         background: Math.mod(row-index, 2) == 0 ? #ffffff : #fafafa;
-        min-height: 22px;
+        min-height: 24px;
         HorizontalLayout {
             padding-top: 4px;
             padding-bottom: 4px;
             padding-left: 6px;
             padding-right: 6px;
-            spacing: 8px;
-            Text {
-                text: root.time;
-                font-size: 11px;
-                color: Theme.text-tertiary;
+            spacing: 0px;
+            Rectangle {
                 width: 64px;
-                vertical-alignment: center;
+                background: #f3f3f3;
+                border-radius: 3px;
+                Text {
+                    text: root.time;
+                    font-size: 11px;
+                    color: Theme.text-tertiary;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
-            Text {
-                text: root.level;
-                font-size: 11px;
-                font-weight: 600;
-                color: root.level == "ERROR" ? Theme.error
-                    : (root.level == "WARN" ? Theme.warning
-                    : (root.level == "INFO" ? Theme.accent-blue : Theme.text-secondary));
-                width: 40px;
-                vertical-alignment: center;
+            Rectangle {
+                width: 8px;
+            }
+            Rectangle {
+                width: 48px;
+                background: root.level == "ERROR" ? #fde7e3
+                    : (root.level == "WARN" ? #fff3d6
+                    : (root.level == "INFO" ? #e8f4fd : #f3f3f3));
+                border-radius: 3px;
+                Text {
+                    text: root.level;
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: root.level == "ERROR" ? Theme.error
+                        : (root.level == "WARN" ? Theme.warning
+                        : (root.level == "INFO" ? Theme.accent-blue : Theme.text-secondary));
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle {
+                width: 8px;
             }
             Text {
                 text: root.message;
                 font-size: 11px;
                 color: Theme.text-primary;
                 wrap: word-wrap;
-                vertical-alignment: center;
+                vertical-alignment: top;
                 horizontal-stretch: 1;
             }
         }
@@ -860,12 +906,19 @@ component AboutPage {
     in property <string> version-text;
     callback check-update();
 
+    // vertical-stretch: 1 让页面填满窗口高度；
+    // 顶部一行靠 alignment: end 把「检查更新」推至右侧；
+    // 下方垂直居中内容用 alignment: center + horizontal-stretch: 1 撑满宽度。
     VerticalLayout {
         padding: 0px;
         spacing: 16px;
+        vertical-stretch: 1;
 
         HorizontalLayout {
-            // 右上角对齐的「检查更新」按钮（高度与小标题同高）
+            width: 100%;
+            HorizontalLayout {
+                horizontal-stretch: 1;
+            }
             Rectangle {
                 height: 28px;
                 width: 110px;
@@ -892,12 +945,14 @@ component AboutPage {
         VerticalLayout {
             spacing: 12px;
             alignment: center;
+            horizontal-stretch: 1;
 
             // 直接以 256×256 source 缩放到 72×72，画质比 24 viewBox 矢量图更稳。
             Image {
                 source: @image-url("../../../assets/app.png");
                 width: 72px;
                 height: 72px;
+                horizontal-alignment: center;
             }
             Text {
                 text: "RouteTool";
@@ -950,13 +1005,13 @@ export component AppWindow inherits Window {
     in property <bool> is-enabled: false;
     in property <bool> is-fallback: false;
     in property <int> latency-ms: -1;
-    in property <string> last-check-text: "--";
     in property <string> version-text: "v0.0.0";
     in property <string> service-status-text: "服务运行中";
 
     in property <[string]> adapter-names: [];
     in-out property <int> adapter-index: -1;
 
+    in property <string> selected-adapter-name: "--";
     in property <string> selected-adapter-ip: "--";
     in property <string> selected-adapter-mask: "--";
     in property <string> selected-adapter-gateway: "--";
@@ -1096,13 +1151,14 @@ export component AppWindow inherits Window {
                     is-enabled: root.is-enabled;
                     is-fallback: root.is-fallback;
                     latency-ms: root.latency-ms;
-                    last-check-text: root.last-check-text;
+                    interval-secs: root.interval-secs;
                     mode-index: root.mode-index;
                     bypass-ip-text: root.bypass-ip-text;
                     adapter-ip: root.selected-adapter-ip;
                     adapter-mask: root.selected-adapter-mask;
                     adapter-gateway: root.selected-adapter-gateway;
                     adapter-dns: root.selected-adapter-dns;
+                    adapter-name: root.selected-adapter-name;
                     toggle => { root.toggle-bypass(); }
                     switch-mode => { root.current-page = 1; }
                 }
