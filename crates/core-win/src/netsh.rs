@@ -8,6 +8,7 @@
 use std::net::Ipv4Addr;
 
 use tokio::process::Command;
+use tracing::error;
 
 use core_lib::CoreError;
 
@@ -20,8 +21,17 @@ async fn run_netsh(args: &[&str]) -> Result<(), CoreError> {
         .map_err(|e| CoreError::Network(format!("无法启动 netsh: {e}")))?;
 
     if !out.status.success() {
+        // netsh 输出在中文系统上是 GBK，lossy 转换后可读性差，但退出码与
+        // 原始文本仍是排查的第一手证据，必须落日志（此前失败毫无痕迹）。
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
+        error!(
+            "netsh {:?} 失败 (exit {:?}): {} {}",
+            args,
+            out.status.code(),
+            stdout.trim(),
+            stderr.trim()
+        );
         return Err(CoreError::Network(format!(
             "netsh 失败: {}{}",
             stderr.trim(),

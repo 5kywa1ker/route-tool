@@ -1,11 +1,12 @@
 //! 网卡列表与路由状态查询（GetAdaptersAddresses / GetIpForwardTable2）。
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
 use windows::Win32::NetworkManagement::IpHelper::{
     FreeMibTable, GetAdaptersAddresses, GetIfEntry2, GetIpForwardTable2, IP_ADAPTER_ADDRESSES_LH,
-    MIB_IF_ROW2,
+    MIB_IF_ROW2, MIB_IPFORWARD_TABLE2,
 };
 use windows::Win32::NetworkManagement::Ndis::{IfOperStatusUp, NET_LUID_LH};
 use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR, SOCKADDR_IN};
@@ -15,6 +16,44 @@ use ipc_protocol::{AdapterInfo, RouteState};
 use crate::icmp::ipv4_from_net_order;
 
 const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
+
+/// 按接口 LUID 收集 IPv4 默认网关（取自路由表）。
+///
+/// `IP_ADAPTER_ADDRESSES_LH::FirstGatewayAddress` 在现行 Windows 上常常根本不
+/// 填充（实测 DHCP 与静态配置的网卡都拿到空链表），直接依赖它会得到空的网关
+/// 列表——进而让"网卡直改"策略的一切判定（是否生效、快照恢复、启动一致性）
+/// 全部失灵。可靠来源只有路由表：取 `0.0.0.0/0` 且下一跳非 0.0.0.0 的条目。
+pub fn default_gateways_by_luid() -> HashMap<u64, Vec<Ipv4Addr>> {
+    let mut out: HashMap<u64, Vec<Ipv4Addr>> = HashMap::new();
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+    unsafe {
+        if GetIpForwardTable2(AF_INET, &mut table) != NO_ERROR {
+            return out;
+        }
+    }
+
+    let n = unsafe { (*table).NumEntries };
+    let rows = unsafe { core::slice::from_raw_parts((*table).Table.as_ptr(), n as usize) };
+    for row in rows {
+        if row.DestinationPrefix.PrefixLength != 0 {
+            continue;
+        }
+        let prefix_raw = unsafe { row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr };
+        if prefix_raw != 0 {
+            continue;
+        }
+        let hop = ipv4_from_net_order(unsafe { row.NextHop.Ipv4.sin_addr.S_un.S_addr });
+        if hop.is_unspecified() {
+            continue;
+        }
+        let list = out.entry(unsafe { row.InterfaceLuid.Value }).or_default();
+        if !list.contains(&hop) {
+            list.push(hop);
+        }
+    }
+    unsafe { FreeMibTable(table as *const _) };
+    out
+}
 
 /// 枚举所有 IPv4 网卡（含连接状态、IP、网关、DNS）。
 pub fn list_adapters() -> windows::core::Result<Vec<AdapterInfo>> {
@@ -45,6 +84,8 @@ pub fn list_adapters() -> windows::core::Result<Vec<AdapterInfo>> {
     }
 
     let mut out = Vec::new();
+    // 网关以路由表为准（FirstGatewayAddress 不可靠，见函数注释）。
+    let gw_map = default_gateways_by_luid();
     let mut p = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
     while !p.is_null() {
         let aa = unsafe { &*p };
@@ -78,7 +119,6 @@ pub fn list_adapters() -> windows::core::Result<Vec<AdapterInfo>> {
             let mut ipv4 = Vec::new();
             let mut ipv4_prefixes = Vec::new();
             let mut dns = Vec::new();
-            let mut gateway = Vec::new();
 
             let mut ua = aa.FirstUnicastAddress;
             while !ua.is_null() {
@@ -100,11 +140,18 @@ pub fn list_adapters() -> windows::core::Result<Vec<AdapterInfo>> {
                 sa = s.Next;
             }
 
+            // 网关：路由表条目优先，FirstGatewayAddress 仅作补充（去重）。
+            let mut gateway = gw_map
+                .get(&unsafe { aa.Luid.Value })
+                .cloned()
+                .unwrap_or_default();
             let mut ga = aa.FirstGatewayAddress;
             while !ga.is_null() {
                 let g = unsafe { &*ga };
                 if let Some(ip) = sockaddr_to_ipv4(g.Address.lpSockaddr) {
-                    gateway.push(ip);
+                    if !gateway.contains(&ip) {
+                        gateway.push(ip);
+                    }
                 }
                 ga = g.Next;
             }

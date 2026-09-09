@@ -107,7 +107,7 @@ impl Controller {
             std::mem::replace(&mut *guard, cfg.clone())
         };
 
-        if self.handle.lock().await.is_none() {
+        if self.handle.lock().await.is_none() && !self.runtime.read().await.is_enabled {
             return Ok(());
         }
 
@@ -118,6 +118,14 @@ impl Controller {
             || old.subnet_mask != cfg.subnet_mask;
         if target_changed {
             info!("config target changed while enabled; re-applying bypass");
+            if old.switch_mode != cfg.switch_mode || old.adapter_id != cfg.adapter_id {
+                // 切换模式/网卡时先清理旧模式的残留状态。旧句柄可能已不在
+                // 手上（服务重启后未持有），enable() 内部的 disable 覆盖不到：
+                // 否则旧的叠加路由仍在，切到直改模式后流量看似仍走旁路由，
+                // 而网卡其实没有被改（用户侧表现即"直改没生效"）。
+                self.cleanup_previous_mode(&old).await;
+                *self.handle.lock().await = None;
+            }
             // enable() 内部先按旧句柄 disable（恢复/删路由），再按新配置启用。
             self.enable().await?;
         } else {
@@ -194,6 +202,44 @@ impl Controller {
         // 状态修正后必须恢复健康检测，否则崩溃自愈后将失去回退保护。
         self.start_health_monitor(&cfg, target).await;
         Ok(())
+    }
+
+    /// 按旧配置清理上一模式的残留状态（叠加路由 / 网卡静态化）。
+    /// 供"启用中切换模式/网卡"使用：旧句柄可能已不在手上（服务重启后未持有），
+    /// enable() 内部的 disable 覆盖不到这种场景。
+    async fn cleanup_previous_mode(&self, old: &AppConfig) {
+        match old.switch_mode {
+            SwitchMode::RouteOverlay => {
+                if let IpAddr::V4(v4) = old.bypass_ip {
+                    match self.overlay.cleanup_routes_via(v4).await {
+                        Ok(0) => {}
+                        Ok(n) => warn!("切换模式：清理了 {n} 条经 {v4} 的旧叠加路由"),
+                        Err(e) => warn!("切换模式：清理旧叠加路由失败: {e}"),
+                    }
+                }
+            }
+            SwitchMode::AdapterReconfig => {
+                if self
+                    .store
+                    .load_snapshot()
+                    .map(|s| s.is_some())
+                    .unwrap_or(false)
+                {
+                    let handle = SwitchHandle {
+                        mode: SwitchMode::AdapterReconfig,
+                        if_index: None,
+                        if_luid: None,
+                        destination_prefix: None,
+                        next_hop: None,
+                        adapter_id: Some(old.adapter_id.clone()),
+                        extra_routes: vec![],
+                    };
+                    if let Err(e) = self.reconfig.disable(&handle).await {
+                        warn!("切换模式：恢复网卡快照失败: {e}");
+                    }
+                }
+            }
+        }
     }
 
     /// 预期直连时清理脏状态：残留叠加路由与孤儿快照。
@@ -301,10 +347,9 @@ impl Controller {
             .find(|x| x.id == adapter_id)
             .ok_or_else(|| CoreError::Network(format!("网卡 {adapter_id} 不存在")))?;
 
-        // DHCP 状态：通过 netsh 查询。查询失败按静态处理（恢复时重放当前参数）。
-        let is_dhcp = crate::netcheck::query_dhcp_enabled(&a.name)
-            .await
-            .unwrap_or(false);
+        // DHCP 状态：读注册表 EnableDHCP（GUID 是子项名，无编码歧义）。
+        // 查询失败按静态处理（恢复时重放当前参数）。
+        let is_dhcp = crate::netcheck::query_dhcp_enabled(&a.id).unwrap_or(false);
 
         // 前缀长度优先取系统真实值，缺项时按 /24 兜底。
         let prefixes: Vec<u8> = if a.ipv4_prefixes.len() == a.ipv4.len() {

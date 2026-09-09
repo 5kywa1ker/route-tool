@@ -63,22 +63,29 @@ impl AdapterReconfigStrategy {
             netsh::reset_dns(&name).await?;
         } else {
             // 恢复原静态参数（掩码取快照记录的真实前缀，缺项按 /24）。
-            let ip = snap
-                .static_ipv4
-                .first()
-                .and_then(|x| match x {
-                    std::net::IpAddr::V4(v4) => Some(v4),
-                    _ => None,
-                })
-                .ok_or_else(|| CoreError::Network("快照缺少 IPv4".into()))?;
-            let gw = snap
-                .gateway
-                .first()
-                .and_then(|x| match x {
-                    std::net::IpAddr::V4(v4) => Some(v4),
-                    _ => None,
-                })
-                .ok_or_else(|| CoreError::Network("快照缺少网关".into()))?;
+            // 快照残缺（缺 IP 或网关）时不再硬报错——那种状态下硬报错会把
+            // 网卡永远留在旁路由网关上；退回 DHCP 至少保证能恢复联网。
+            let ip = snap.static_ipv4.first().and_then(|x| match x {
+                std::net::IpAddr::V4(v4) => Some(v4),
+                _ => None,
+            });
+            let gw = snap.gateway.first().and_then(|x| match x {
+                std::net::IpAddr::V4(v4) => Some(v4),
+                _ => None,
+            });
+            let (Some(ip), Some(gw)) = (ip, gw) else {
+                tracing::warn!(
+                    "快照缺少 IP/网关（adapter {}），回退为 DHCP 恢复",
+                    snap.adapter_id
+                );
+                netsh::enable_dhcp(&name).await?;
+                netsh::reset_dns(&name).await?;
+                info!(
+                    "adapter {} restored as dhcp (incomplete snapshot)",
+                    snap.adapter_id
+                );
+                return Ok(());
+            };
             let mask = mask_from_prefix(
                 snap.static_ipv4_mask
                     .first()
@@ -161,7 +168,8 @@ impl SwitchStrategy for AdapterReconfigStrategy {
             if_index: None,
             if_luid: None,
             destination_prefix: None,
-            next_hop: None,
+            // 记录旁路由网关，is_active 据此精确校验是否仍生效。
+            next_hop: Some(std::net::IpAddr::V4(bypass_ip)),
             adapter_id: Some(target.adapter_id.clone()),
             extra_routes: vec![],
         })
@@ -187,13 +195,18 @@ impl SwitchStrategy for AdapterReconfigStrategy {
         let Some(adapter_id) = &handle.adapter_id else {
             return Ok(false);
         };
+        // 生效 = 网卡 Up 且默认网关就是旁路由地址。
+        // 期望网关记录在句柄的 next_hop 里（enable 时写入）。
+        let expected_gw = match handle.next_hop {
+            Some(std::net::IpAddr::V4(v4)) => v4,
+            // 旧版本句柄没有记录网关；此时无法精确校验，按未生效处理，
+            // 由健康检测重建句柄（reenable 后即带 next_hop）。
+            _ => return Ok(false),
+        };
         let list = adapters::list_adapters()
             .map_err(|e| CoreError::Network(format!("枚举网卡失败: {e}")))?;
         match list.iter().find(|a| a.id == *adapter_id) {
-            Some(a) => {
-                // 生效 = 网卡 Up 且网关列表首项为 bypass 网关（近似判断）。
-                Ok(a.is_connected && !a.gateway.is_empty())
-            }
+            Some(a) => Ok(a.is_connected && a.gateway.iter().any(|g| *g == expected_gw)),
             None => Ok(false),
         }
     }

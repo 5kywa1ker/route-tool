@@ -55,6 +55,19 @@ fn run_service() -> windows_service::Result<()> {
     };
     status_handle.set_service_status(start_pending)?;
 
+    // 上报 Running：此前从未上报，SCM 里服务会永远停留在“正在启动”，
+    // 服务管理器里既看不到正常运行状态，也无法按常规路径停止/重启。
+    let running = ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Running,
+        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::from_secs(5),
+        process_id: None,
+    };
+    status_handle.set_service_status(running)?;
+
     // 运行核心逻辑（tokio runtime）。
     let rt = tokio::runtime::Runtime::new().expect("创建 tokio runtime 失败");
     rt.block_on(async move {
