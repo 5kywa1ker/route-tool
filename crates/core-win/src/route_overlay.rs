@@ -31,6 +31,14 @@ pub const EXTRA_PREFIX: &str = "128.0.0.0/1";
 /// 本策略添加的路由协议标记（NL_ROUTE_PROTOCOL netmgmt = 3）。
 const ROUTE_PROTOCOL_NETMGMT: i32 = 3;
 
+/// 路由生命周期"无限"（0xFFFFFFFF，见 MIB_IPFORWARD_ROW2 文档）。
+///
+/// 必须显式设置：`Default::default()` 得到的是 0 秒，Windows 会把这类条目
+/// 视为**已过期**——它仍能被 GetIpForwardTable2 / `route print` 枚举出来
+/// （State 照样是 Alive，极具迷惑性），但不会参与最长前缀匹配与转发，
+/// 表现为"启用成功、路由在表里，流量却仍走原默认网关"。
+const INFINITE_LIFETIME: u32 = u32::MAX;
+
 /// 路由叠加策略：添加两条经旁路由的 /1 路由，覆盖默认路由。
 pub struct RouteOverlayStrategy {
     /// 叠加路由使用的 metric（/1 前缀必然胜出，metric 仅作提示）。
@@ -135,10 +143,10 @@ impl RouteOverlayStrategy {
             .map_err(|e| CoreError::Network(format!("读取路由表失败: {e}")))?;
         let main = rows
             .iter()
-            .find(|r| r.prefix_len == 1 && r.prefix.is_unspecified());
-        let extra = rows
-            .iter()
-            .find(|r| r.prefix_len == 1 && r.prefix == Ipv4Addr::new(128, 0, 0, 0));
+            .find(|r| r.prefix_len == 1 && r.prefix.is_unspecified() && is_effective(r));
+        let extra = rows.iter().find(|r| {
+            r.prefix_len == 1 && r.prefix == Ipv4Addr::new(128, 0, 0, 0) && is_effective(r)
+        });
         let (Some(m), Some(e)) = (main, extra) else {
             return Ok(None);
         };
@@ -221,6 +229,9 @@ fn build_row(
     row.NextHop = sockaddr_inet(next_hop);
     row.Metric = metric;
     row.Protocol = NL_ROUTE_PROTOCOL(ROUTE_PROTOCOL_NETMGMT);
+    // 生命周期置为无限，否则条目一创建即过期、不参与转发。
+    row.ValidLifetime = INFINITE_LIFETIME;
+    row.PreferredLifetime = INFINITE_LIFETIME;
     row
 }
 
@@ -231,6 +242,13 @@ struct OverlayRow {
     if_luid: u64,
     prefix: Ipv4Addr,
     prefix_len: u8,
+    /// 条目剩余有效期（秒）。0 表示已过期：可被枚举但不参与转发。
+    valid_lifetime: u32,
+}
+
+/// 该条目是否真正参与转发（生命周期过期的不算，见 INFINITE_LIFETIME 注释）。
+fn is_effective(row: &OverlayRow) -> bool {
+    row.valid_lifetime != 0
 }
 
 /// 扫描路由表：返回所有 next_hop == bypass_ip（含历史反转字节序）、
@@ -244,6 +262,7 @@ fn scan_overlay_rows(bypass_ip: Ipv4Addr) -> windows::core::Result<Vec<OverlayRo
                 if_luid: row.InterfaceLuid.Value,
                 prefix: ipv4_from_net_order(row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr),
                 prefix_len: row.DestinationPrefix.PrefixLength,
+                valid_lifetime: row.ValidLifetime,
             });
         }
     }
@@ -385,6 +404,7 @@ impl SwitchStrategy for RouteOverlayStrategy {
             rows.iter().any(|r| {
                 r.prefix_len == 1
                     && r.prefix == prefix
+                    && is_effective(r)
                     && handle.if_index.is_none_or(|idx| r.if_index == idx)
                     && adapters::is_interface_up(r.if_index)
             })
@@ -396,5 +416,41 @@ impl SwitchStrategy for RouteOverlayStrategy {
         // 一致性修正由 core-bin 控制层结合 state_store 预期状态处理；
         // 策略层提供 existing_handle_for / cleanup_routes_via 能力。
         Ok(ReconcileAction::NoAction)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core_lib::switch_engine::ROUTE_METRIC;
+
+    /// 生命周期必须是无限，否则路由一创建即过期、不参与转发（历史 bug）。
+    #[test]
+    fn build_row_uses_infinite_lifetime() {
+        let row = build_row(
+            1,
+            1,
+            Ipv4Addr::UNSPECIFIED,
+            1,
+            Ipv4Addr::new(192, 168, 1, 1),
+            5,
+        );
+        assert_eq!(row.ValidLifetime, u32::MAX);
+        assert_eq!(row.PreferredLifetime, u32::MAX);
+    }
+
+    /// 前缀与下一跳按 Windows 网络序写入，读回必须与写入地址一致（历史字节序 bug）。
+    #[test]
+    fn build_row_roundtrips_addresses() {
+        let dest = Ipv4Addr::new(128, 0, 0, 0);
+        let next_hop = Ipv4Addr::new(192, 168, 123, 105);
+        let row = build_row(1, 1, dest, 1, next_hop, ROUTE_METRIC);
+
+        let got_dest =
+            ipv4_from_net_order(unsafe { row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr });
+        let got_hop = ipv4_from_net_order(unsafe { row.NextHop.Ipv4.sin_addr.S_un.S_addr });
+        assert_eq!(got_dest, dest);
+        assert_eq!(got_hop, next_hop);
+        assert_eq!(row.DestinationPrefix.PrefixLength, 1);
     }
 }

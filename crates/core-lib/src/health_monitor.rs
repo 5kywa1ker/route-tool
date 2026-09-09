@@ -66,7 +66,10 @@ pub struct HealthParams {
 pub async fn run_loop(ctx: HealthCtx, params: HealthParams, mut cancel: watch::Receiver<bool>) {
     let mut timer = tokio::time::interval(params.interval);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut state = HealthState::Idle;
+    // 循环只在"已启用"时由 Controller 启动，因此起始状态就是 Healthy。
+    // 注意：不能从 Idle 起步——tick 遇到 Idle 会直接 return，状态又无处推进，
+    // 会导致健康检测与自动回退彻底失效（历史 bug）。
+    let mut state = HealthState::Healthy;
 
     info!(
         "health monitor started: interval={:?} threshold={}",
