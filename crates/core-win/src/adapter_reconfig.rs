@@ -123,7 +123,7 @@ impl SwitchStrategy for AdapterReconfigStrategy {
 
         let iface = self.iface_name(&target.adapter_id)?;
 
-        // 当前网卡的 IPv4 与掩码（保留原 IP，仅改网关）。
+        // 当前网卡的 IPv4 与掩码（用于在未显式指定静态 IP 时保留原 IP）。
         let list = adapters::list_adapters()
             .map_err(|e| CoreError::Network(format!("枚举网卡失败: {e}")))?;
         let current = list
@@ -131,14 +131,24 @@ impl SwitchStrategy for AdapterReconfigStrategy {
             .find(|a| a.id == target.adapter_id)
             .ok_or_else(|| CoreError::Network(format!("网卡 {} 不存在", target.adapter_id)))?;
 
-        let ip = current
-            .ipv4
-            .first()
-            .copied()
-            .ok_or_else(|| CoreError::Network("网卡无 IPv4 地址，无法直改".into()))?;
-        let ip = match ip {
-            std::net::IpAddr::V4(v4) => v4,
-            _ => return Err(CoreError::Network("仅支持 IPv4".into())),
+        // 要写死的静态 IP：优先取用户显式配置（static_ip），否则保留网卡当前 IP。
+        //
+        // 注意：网卡原本是 DHCP 时，"保留当前 IP"拿到的是 DHCP 租约地址，租约
+        // 续期/网卡重连后该地址会漂移甚至被系统回滚，导致直改"看起来没生效"。
+        // 因此直改模式强烈建议用户显式指定 static_ip。
+        let ip = match target.static_ip {
+            Some(v4) => v4,
+            None => {
+                let cur = current
+                    .ipv4
+                    .first()
+                    .copied()
+                    .ok_or_else(|| CoreError::Network("网卡无 IPv4 地址，无法直改".into()))?;
+                match cur {
+                    std::net::IpAddr::V4(v4) => v4,
+                    _ => return Err(CoreError::Network("仅支持 IPv4".into())),
+                }
+            }
         };
 
         // 保留原有 DNS 或默认使用旁路由 IP。
@@ -157,6 +167,18 @@ impl SwitchStrategy for AdapterReconfigStrategy {
         let mask = target
             .subnet_mask
             .unwrap_or_else(|| mask_from_prefix(DEFAULT_MASK_PREFIX));
+
+        // 关键校验：网关（旁路由 IP）必须与网卡静态 IP 在同一子网，否则
+        // netsh 在部分 Windows 版本上会静默丢弃网关（命令退出码仍为 0），
+        // 表现就是"直改成功但网关没变"。
+        let ip_u32 = u32::from(ip);
+        let gw_u32 = u32::from(bypass_ip);
+        let mask_u32 = u32::from(mask);
+        if (ip_u32 & mask_u32) != (gw_u32 & mask_u32) {
+            return Err(CoreError::Network(format!(
+                "旁路由网关 {bypass_ip} 与网卡静态 IP {ip}（掩码 {mask}）不在同一子网，无法直改"
+            )));
+        }
 
         netsh::set_static_ipv4(&iface, ip, mask, bypass_ip).await?;
         netsh::set_dns(&iface, &dns).await?;

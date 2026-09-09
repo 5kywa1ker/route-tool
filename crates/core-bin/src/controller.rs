@@ -94,6 +94,14 @@ impl Controller {
                 ));
             }
         }
+        // 直改模式的静态 IP：仅 IPv4 且不能是全 0 / 广播地址。
+        if let Some(ip) = cfg.static_ip {
+            if ip.is_unspecified() {
+                return Err(CoreError::ConfigIncomplete(
+                    "网卡静态 IP 无效（不能为 0.0.0.0）".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -115,7 +123,8 @@ impl Controller {
             || old.bypass_ip != cfg.bypass_ip
             || old.switch_mode != cfg.switch_mode
             || old.dns_override != cfg.dns_override
-            || old.subnet_mask != cfg.subnet_mask;
+            || old.subnet_mask != cfg.subnet_mask
+            || old.static_ip != cfg.static_ip;
         if target_changed {
             info!("config target changed while enabled; re-applying bypass");
             if old.switch_mode != cfg.switch_mode || old.adapter_id != cfg.adapter_id {
@@ -424,6 +433,7 @@ fn bypass_target(cfg: &AppConfig) -> BypassTarget {
         bypass_ip: cfg.bypass_ip,
         dns: cfg.dns_override.clone(),
         subnet_mask: cfg.subnet_mask,
+        static_ip: cfg.static_ip,
     }
 }
 

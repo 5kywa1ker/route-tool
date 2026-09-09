@@ -41,6 +41,61 @@ fn parse_dns_list(text: &str) -> Result<Option<Vec<std::net::IpAddr>>, String> {
     Ok(Some(out))
 }
 
+/// 从 UI 控件读取当前配置，构造 AppConfig（不含 adapter_id，调用方补齐）。
+///
+/// 校验失败返回 Err(错误提示)，调用方应把提示显示到 config-error 文本上。
+/// 供"保存配置"与"启用旁路由"共用——启用前必须先保存 UI 上的 switch_mode /
+/// 静态 IP 等，否则启用走的是 core 里旧的 switch_mode（历史 bug：用户选了
+/// "网卡直改"但没点保存，启用时仍按路由叠加执行，网卡根本不会被改）。
+fn build_config_from_ui(app: &AppWindow) -> Result<AppConfig, String> {
+    let ip: std::net::IpAddr = app
+        .get_bypass_ip_text()
+        .parse()
+        .map_err(|_| "旁路由 IP 无效".to_string())?;
+
+    let static_ip_text = app.get_static_ip_text().trim().to_string();
+    let static_ip = if static_ip_text.is_empty() {
+        None
+    } else {
+        Some(
+            static_ip_text
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|_| "网卡静态 IP 无效（如 192.168.2.100）".to_string())?,
+        )
+    };
+
+    let mask_text = app.get_mask_text().trim().to_string();
+    let mask = if mask_text.is_empty() {
+        Some(DEFAULT_MASK.parse().unwrap())
+    } else {
+        Some(
+            mask_text
+                .parse()
+                .map_err(|_| "子网掩码无效（如 255.255.255.0）".to_string())?,
+        )
+    };
+
+    let dns = parse_dns_list(&app.get_dns_text())?;
+
+    let mut cfg = AppConfig {
+        bypass_ip: ip,
+        switch_mode: if app.get_mode_index() == 1 {
+            SwitchMode::AdapterReconfig
+        } else {
+            SwitchMode::RouteOverlay
+        },
+        ..AppConfig::default()
+    };
+    cfg.subnet_mask = mask;
+    cfg.static_ip = static_ip;
+    cfg.dns_override = dns;
+    cfg.health_check_interval_secs = app.get_interval_secs().max(1) as u32;
+    cfg.failure_threshold = app.get_failure_threshold().max(1) as u32;
+    cfg.auto_reenable_after_recovery = app.get_auto_reenable();
+    cfg.notifications_enabled = app.get_notifications();
+    Ok(cfg)
+}
+
 /// UI 全局状态（连接共享）。
 struct UiState {
     client: Option<ipc_client::IpcClient>,
@@ -100,6 +155,12 @@ fn apply_config_to_ui(app: &AppWindow, cfg: &AppConfig) {
         cfg.subnet_mask
             .map(|m| m.to_string())
             .unwrap_or_else(|| DEFAULT_MASK.to_string())
+            .into(),
+    );
+    app.set_static_ip_text(
+        cfg.static_ip
+            .map(|ip| ip.to_string())
+            .unwrap_or_default()
             .into(),
     );
     let dns_text = cfg
@@ -279,13 +340,44 @@ fn main() -> anyhow::Result<()> {
             let app_weak = app_weak.clone();
             let enable = !is_enabled_now(&app_weak);
             let rt = rt.clone();
+
+            // 启用前先从 UI 读取当前配置（尤其是 switch_mode）并同步到 core：
+            // 否则用户选了"网卡直改"却没点保存，启用时仍按 core 里旧的
+            // routeoverlay 执行，网卡根本不会被改（历史 bug 的根因）。
+            let mut cfg = match app_weak.upgrade() {
+                Some(app) => match build_config_from_ui(&app) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(a) = app_weak.upgrade() {
+                                a.set_config_error(e.into());
+                            }
+                        });
+                        return;
+                    }
+                },
+                None => return,
+            };
+
             rt.spawn(async move {
+                // 先取 adapter_id（锁外一次性取好），避免在 client 借用期间
+                // 再访问 st.config 造成双重借用。
+                let adapter_id = {
+                    let st = state.lock().await;
+                    st.config.adapter_id.clone()
+                };
+                cfg.adapter_id = adapter_id;
+
                 let result = {
                     let mut st = state.lock().await;
                     match st.client.as_mut() {
                         Some(c) => {
                             if enable {
-                                c.enable().await
+                                // 先落配置（含 switch_mode），再启用。
+                                match c.update_config(&cfg).await {
+                                    Ok(()) => c.enable().await,
+                                    Err(e) => Err(e),
+                                }
                             } else {
                                 c.disable().await
                             }
@@ -293,6 +385,10 @@ fn main() -> anyhow::Result<()> {
                         None => Err("未连接到核心服务".to_string()),
                     }
                 };
+                if result.is_ok() {
+                    let mut st = state.lock().await;
+                    st.config = cfg;
+                }
                 if let Err(e) = result {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(app) = app_weak.upgrade() {
@@ -362,48 +458,13 @@ fn main() -> anyhow::Result<()> {
                 Some(a) => a,
                 None => return,
             };
-            let ip: std::net::IpAddr = match app.get_bypass_ip_text().parse() {
-                Ok(ip) => ip,
-                Err(_) => {
-                    app.set_config_error("旁路由 IP 无效".into());
-                    return;
-                }
-            };
-            // 直改模式专有项：子网掩码 + DNS（保存时一并校验，路由叠加模式下值保留）。
-            let mask_text = app.get_mask_text().trim().to_string();
-            let mask = if mask_text.is_empty() {
-                Some(DEFAULT_MASK.parse().unwrap())
-            } else {
-                match mask_text.parse() {
-                    Ok(m) => Some(m),
-                    Err(_) => {
-                        app.set_config_error("子网掩码无效（如 255.255.255.0）".into());
-                        return;
-                    }
-                }
-            };
-            let dns = match parse_dns_list(&app.get_dns_text()) {
-                Ok(d) => d,
+            let mut cfg = match build_config_from_ui(&app) {
+                Ok(c) => c,
                 Err(e) => {
                     app.set_config_error(e.into());
                     return;
                 }
             };
-            let mut cfg = AppConfig {
-                bypass_ip: ip,
-                switch_mode: if app.get_mode_index() == 1 {
-                    SwitchMode::AdapterReconfig
-                } else {
-                    SwitchMode::RouteOverlay
-                },
-                ..AppConfig::default()
-            };
-            cfg.subnet_mask = mask;
-            cfg.dns_override = dns;
-            cfg.health_check_interval_secs = app.get_interval_secs().max(1) as u32;
-            cfg.failure_threshold = app.get_failure_threshold().max(1) as u32;
-            cfg.auto_reenable_after_recovery = app.get_auto_reenable();
-            cfg.notifications_enabled = app.get_notifications();
             drop(app);
 
             let rt = rt.clone();

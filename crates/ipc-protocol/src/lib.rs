@@ -32,6 +32,13 @@ pub struct BypassTarget {
     /// 网卡直改模式使用的子网掩码；None 时策略层按 255.255.255.0 处理。
     #[serde(default)]
     pub subnet_mask: Option<std::net::Ipv4Addr>,
+    /// 网卡直改模式要设置的静态 IP；None 时策略层保留网卡当前 IP。
+    ///
+    /// 当网卡原本是 DHCP 时，"保留当前 IP"拿到的是 DHCP 租约地址，租约续期/
+    /// 网卡重连后地址会漂移，甚至被系统回滚回 DHCP，导致直改"看起来没生效"。
+    /// 因此直改模式应允许用户显式指定要写死的静态 IP。
+    #[serde(default)]
+    pub static_ip: Option<std::net::Ipv4Addr>,
 }
 
 /// 网卡信息。
@@ -140,6 +147,9 @@ pub struct AppConfig {
     /// 网卡直改模式的子网掩码；None = 255.255.255.0（路由叠加模式忽略）。
     #[serde(default)]
     pub subnet_mask: Option<std::net::Ipv4Addr>,
+    /// 网卡直改模式要设置的静态 IP；None = 保留网卡当前 IP（路由叠加模式忽略）。
+    #[serde(default)]
+    pub static_ip: Option<std::net::Ipv4Addr>,
     pub health_check_interval_secs: u32,
     pub failure_threshold: u32,
     pub auto_reenable_after_recovery: bool,
@@ -155,6 +165,7 @@ impl Default for AppConfig {
             switch_mode: SwitchMode::RouteOverlay,
             dns_override: None,
             subnet_mask: None,
+            static_ip: None,
             health_check_interval_secs: 5,
             failure_threshold: 3,
             auto_reenable_after_recovery: false,

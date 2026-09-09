@@ -21,6 +21,7 @@ export component AppWindow inherits Window {
     in-out property <int> mode-index: 0;         // 0=路由叠加 1=网卡直改
     in-out property <string> dns-text: "";
     in-out property <string> mask-text: "";
+    in-out property <string> static-ip-text: "";
     in-out property <int> interval-secs: 5;
     in-out property <int> failure-threshold: 3;
     in-out property <bool> auto-reenable: false;
@@ -171,6 +172,18 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         spacing: 4px;
                         Text {
+                            text: "网卡静态 IP";
+                            font-size: 12px;
+                            color: #5d5d5d;
+                        }
+                        LineEdit {
+                            text <=> root.static-ip-text;
+                            placeholder-text: "留空则保留当前 IP";
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text {
                             text: "子网掩码";
                             font-size: 12px;
                             color: #5d5d5d;
@@ -264,7 +277,7 @@ export component AppWindow inherits Window {
 
         // 说明文字
         Text {
-            text: "路由叠加：添加 0.0.0.0/1 + 128.0.0.0/1 两条路由覆盖默认路由，不动网卡配置。\n网卡直改：直接修改网卡的网关 / DNS / 子网掩码，需备份恢复，风险略高。";
+            text: "路由叠加：添加 0.0.0.0/1 + 128.0.0.0/1 两条路由覆盖默认路由，不动网卡配置。\n网卡直改：把网卡设为静态 IP（建议填写），网关指向旁路由 IP，需备份恢复，风险略高。";
             font-size: 10px;
             color: #888888;
             wrap: word-wrap;
