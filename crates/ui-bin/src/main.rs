@@ -282,15 +282,10 @@ fn read_logs() -> Vec<LogEntry> {
         }
     }
 
-    // 合并后按时间排序并截断。
-    out.sort_by(|a, b| a.time.cmp(&b.time));
-    out.into_iter()
-        .rev()
-        .take(200)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
+    // 合并后按时间倒序（最新在前），截断最近 200 条。
+    out.sort_by(|a, b| b.time.cmp(&a.time));
+    out.truncate(200);
+    out
 }
 
 /// 把 tracing 默认格式的 RFC3339 时间戳（带 Z 后缀）格式化为本地时区的 HH:MM:SS。
@@ -315,8 +310,32 @@ fn format_local_hms(raw: &str) -> String {
         })
 }
 
+/// 判断 token 是否形如 tracing 默认格式的时间戳列。
+fn looks_like_timestamp(s: &str) -> bool {
+    if chrono::DateTime::parse_from_rfc3339(s).is_ok() {
+        return true;
+    }
+    // 兼容缺时区后缀的 `2026-09-09T12:06:50` 形态。
+    let b = s.as_bytes();
+    s.len() >= 19 && b[4] == b'-' && b[7] == b'-' && b[10] == b'T'
+}
+
+/// 在第一个空白字符处切一刀，返回 (token, 去掉前导空白的剩余部分)。
+///
+/// 不能用单空格 `splitn`：tracing 的级别列按 5 字符右对齐，
+/// `INFO`/`WARN` 前会有对齐空格（如两个连续空格），单空格切分会把
+/// 级别切成空串、消息里混进级别与模块路径。
+fn split_ws_once(s: &str) -> Option<(&str, &str)> {
+    let i = s.find(char::is_whitespace)?;
+    Some((&s[..i], s[i..].trim_start()))
+}
+
 /// 读取单个日志文件，按 tracing 默认格式解析：
-/// `2026-09-09T08:40:22.123456Z  INFO module::path: message`
+/// `2026-09-09T08:40:22.123456Z  INFO route_tool_core::service_host: 服务已卸载`
+///
+/// 时间、级别、消息三段；target（模块路径）不单独展示，
+/// 用第一个 `": "`（冒号+空格）切出消息体——target 内部的 `::` 不带空格，
+/// 不会被误切。不以时间戳开头的行视为上一条消息的换行续行（如 pretty 堆栈）。
 fn read_log_file(path: &std::path::Path, out: &mut Vec<LogEntry>) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
@@ -326,21 +345,24 @@ fn read_log_file(path: &std::path::Path, out: &mut Vec<LogEntry>) {
         if line.is_empty() {
             continue;
         }
-        // 尝试按空白拆分：时间、级别、目标:消息
-        let mut parts = line.splitn(3, ' ');
-        let time_raw = parts.next().unwrap_or("");
-        let level_raw = parts.next().unwrap_or("");
-        let rest = parts.next().unwrap_or(line);
-
+        let Some((first, rest)) = split_ws_once(line) else {
+            continue;
+        };
+        if !looks_like_timestamp(first) {
+            // 多行消息的续行，拼接进上一条，避免被误解析成乱码条目。
+            if let Some(last) = out.last_mut() {
+                last.message = format!("{}\n{}", last.message, line).into();
+            }
+            continue;
+        }
         // 本地时区显示（用户的实际视角），不再是 UTC 字符串切片。
-        let time = format_local_hms(time_raw);
-
+        let time = format_local_hms(first);
+        let (level_raw, rest) = split_ws_once(rest).unwrap_or(("", rest));
         let level = level_raw.trim().to_uppercase();
-        // 去掉目标前缀（如 module::path:）
-        let message = if let Some((_, msg)) = rest.split_once(':') {
-            msg.trim().to_string()
-        } else {
-            rest.to_string()
+        // 去掉目标前缀（如 route_tool_core::service_host:）
+        let message = match rest.split_once(": ") {
+            Some((_, msg)) => msg.trim().to_string(),
+            None => rest.to_string(),
         };
 
         out.push(LogEntry {

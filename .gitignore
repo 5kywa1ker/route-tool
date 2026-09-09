@@ -14,3 +14,6 @@ installer/Output/
 
 # WorkBuddy project data (not part of the project)
 .workbuddy/
+
+# AI generated images (working assets, not part of the project)
+/generated-images/
