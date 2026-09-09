@@ -11,16 +11,16 @@ Windows 11桌面工具，通过路由表叠加或网卡直改两种方式，一�
 
 ```
 ┌─────────────────────┐         Named Pipe           ┌──────────────────────────┐
-│   bypass-ui.exe      │ ◄──────  JSON-RPC  ────────► │   bypass-core.exe          │
+│   route-tool-ui.exe  │ ◄──────  JSON-RPC  ────────► │   route-tool-core.exe     │
 │  (托盘 + 设置窗口)     │      (本地IPC，双向)          │  (Windows Service运行)     │
 │  普通用户权限          │   订阅状态推送(切换/异常/日志) │  SYSTEM权限                │
 └─────────────────────┘                                └──────────────────────────┘
 ```
 
 - 两个独立可执行文件，独立进程，通过IPC通信
-- `bypass-core` 以Windows服务形式安装、开机自启、SYSTEM权限运行，独立完成健康检测与自动回退，**不依赖UI存活**
-- `bypass-ui` 普通用户权限运行，只负责展示状态和下发指令，可随时关闭不影响Core工作
-- 安装时执行一次 `bypass-core.exe --install-service` 完成服务注册（此为唯一一次需要管理员权限确认的时机）
+- `route-tool-core` 以Windows服务形式安装、开机自启、SYSTEM权限运行，独立完成健康检测与自动回退，**不依赖UI存活**
+- `route-tool-ui` 普通用户权限运行，只负责展示状态和下发指令，可随时关闭不影响Core工作
+- 安装时执行一次 `route-tool-core.exe --install-service` 完成服务注册（此为唯一一次需要管理员权限确认的时机）
 
 ## 2. 技术栈
 
@@ -138,12 +138,12 @@ pub struct RuntimeState {
 }
 ```
 
-- 配置文件与运行状态文件分开存储（`config.json` / `runtime_state.json`），均落在 `%ProgramData%\BypassTool\`（服务级数据，不用用户目录，因为Core以SYSTEM权限运行）
+- 配置文件与运行状态文件分开存储（`config.json` / `runtime_state.json`），均落在 `%ProgramData%\RouteTool\`（服务级数据，不用用户目录，因为Core以SYSTEM权限运行）
 - 所有写入操作走"临时文件+原子rename"
 
 ## 4. IPC 协议
 
-Named Pipe，管道名如 `\\.\pipe\BypassToolCore`，ACL限制仅当前用户/管理员组可连接。
+Named Pipe，管道名如 `\\.\pipe\RouteToolCore`，ACL限制仅当前用户/管理员组可连接。
 
 协议：行分隔JSON-RPC 2.0风格，请求/响应 + 服务端主动推送事件两种消息类型。
 
@@ -211,8 +211,8 @@ Named Pipe，管道名如 `\\.\pipe\BypassToolCore`，ACL限制仅当前用户/�
 - 步骤：
   1. checkout
   2. 安装Rust工具链（`dtolnay/rust-toolchain` 或官方action）
-  3. `cargo build --release` 生成 `bypass-core.exe` 与 `bypass-ui.exe`
-  4. 用 Inno Setup（`iscc`，可通过 chocolatey 或直接下载安装）编译安装包，安装脚本包含"运行`bypass-core.exe --install-service`"步骤
+  3. `cargo build --release` 生成 `route-tool-core.exe` 与 `route-tool-ui.exe`
+  4. 用 Inno Setup（`iscc`，可通过 chocolatey 或直接下载安装）编译安装包，安装脚本包含"运行`route-tool-core.exe --install-service`"步骤
   5. `softprops/action-gh-release` 创建Release并上传安装包
 - 版本号：从Git tag读取，注入到`Cargo.toml`版本与安装包版本信息中
 - 本地开发不要求配置任何编译发布环境，全部产物由Actions产出
@@ -224,9 +224,9 @@ bypass-tool/
 ├── crates/
 │   ├── core-lib/          # 平台无关的trait定义 + 状态机逻辑
 │   ├── core-win/          # Windows专属实现（IP Helper调用等）
-│   ├── core-bin/          # bypass-core.exe 入口（服务宿主+IPC server）
+│   ├── core-bin/          # route-tool-core.exe 入口（服务宿主+IPC server）
 │   ├── ipc-protocol/      # 共享的JSON-RPC协议定义
-│   └── ui-bin/            # bypass-ui.exe 入口（托盘+设置窗口）
+│   └── ui-bin/            # route-tool-ui.exe 入口（托盘+设置窗口）
 ├── installer/             # Inno Setup脚本
 ├── .github/workflows/
 │   └── release.yml
@@ -276,17 +276,17 @@ bypass-tool/
 | 范围 | 说明 |
 |---|---|
 | workspace 结构 | 5 crates：`ipc-protocol` / `core-lib` / `core-win` / `core-bin` / `ui-bin` |
-| IPC 协议 | 行分隔 JSON-RPC 2.0，管道 `\\.\pipe\BypassToolCore`（DACL 仅 SYSTEM/Administrators/Authenticated Users），支持 GetStatus / GetConfig / UpdateConfig / EnableBypass / DisableBypass / TestConnectivity / ListAdapters / SubscribeEvents（事件推送）；响应携带 `protocol_version` / `supported_modes` 预留协商字段 |
+| IPC 协议 | 行分隔 JSON-RPC 2.0，管道 `\\.\pipe\RouteToolCore`（DACL 仅 SYSTEM/Administrators/Authenticated Users），支持 GetStatus / GetConfig / UpdateConfig / EnableBypass / DisableBypass / TestConnectivity / ListAdapters / SubscribeEvents（事件推送）；响应携带 `protocol_version` / `supported_modes` 预留协商字段 |
 | RouteOverlay 策略 | `CreateIpForwardEntry2`/`DeleteIpForwardEntry2` 添加/删除 `0.0.0.0/1` + `128.0.0.0/1` 两条叠加路由（最长前缀匹配必然覆盖默认路由，不依赖 metric），`is_active` 校验两条 /1 路由 + 接口状态 |
 | AdapterReconfig 策略 | netsh 静态 IP/网关/DNS 切换；启用前快照备份（`adapter_snapshot.json`），禁用时恢复（DHCP 或原静态参数）——恢复逻辑在策略 `disable` 内完成，手动禁用与健康检测自动回退共用同一路径 |
 | 健康检测 | 定时 ICMP ping bypass_ip，连续失败达阈值 → 自动回退（调策略 disable）+ `AutoFallbackTriggered` 事件；可选"恢复后自动重新启用"；健康巡检中自动校验路由仍生效（睡眠唤醒/网卡切换自愈）；回退/重建等状态变化持久化到 `runtime_state.json`；世代计数器防止 disable 后在途探测复活路由 |
 | 启动一致性校验 | `reconcile_on_startup`：按 `runtime_state.json` 预期状态修正实际状态（叠加模式校验/重建 /1 路由，直改模式校验网关/快照）；预期直连时清理残留叠加路由与孤儿快照；校验后恢复健康检测循环 |
 | UpdateConfig 热生效 | 配置校验（网卡/IP/间隔/阈值）→ 落盘；启用中目标变更（网卡/IP/模式/DNS）自动重放切换，仅健康参数变化则重启监控循环 |
-| Windows 服务 | `bypass-core --install-service` / `--uninstall-service`，SCM 管理自启，`--console` 调试模式；Stop/Shutdown 信号优雅停机（IPC server 退出后上报 Stopped） |
-| 持久化 | `%ProgramData%\BypassTool\{config,runtime_state,adapter_snapshot}.json`，临时文件+fsync+原子 rename，损坏文件按默认值容错 |
-| 日志 | tracing + tracing-appender 按天滚动（`%ProgramData%\BypassTool\logs\`；UI 日志在 `%TEMP%\BypassTool\`）；7 天保留期，core 启动时清理 + 每 24h 巡检，UI 启动时清理 |
+| Windows 服务 | `route-tool-core --install-service` / `--uninstall-service`，SCM 管理自启，`--console` 调试模式；Stop/Shutdown 信号优雅停机（IPC server 退出后上报 Stopped） |
+| 持久化 | `%ProgramData%\RouteTool\{config,runtime_state,adapter_snapshot}.json`，临时文件+fsync+原子 rename，损坏文件按默认值容错 |
+| 日志 | tracing + tracing-appender 按天滚动（`%ProgramData%\RouteTool\logs\`；UI 日志在 `%TEMP%\RouteTool\`）；7 天保留期，core 启动时清理 + 每 24h 巡检，UI 启动时清理 |
 | UI | 托盘（灰/绿/红三态图标 + 右键菜单 + 悬浮提示）、Slint 设置窗口、Toast 通知（回退时）、1s 状态轮询 + 断线自动重连（含配置/网卡列表重新同步）；网卡下拉框选择即落盘；关窗口隐藏到托盘不退出，托盘"打开设置"可唤出 |
-| 安装包 | `installer/BypassTool.iss`（Inno Setup，含服务注册/启动/开机自启 UI 可选项） |
+| 安装包 | `installer/RouteTool.iss`（Inno Setup，含服务注册/启动/开机自启 UI 可选项） |
 | CI/CD | `.github/workflows/release.yml`：push tag `v*` → 构建（`--target x86_64-pc-windows-msvc`，与安装包路径一致）→ 测试 → iscc 打包 → GitHub Release |
 | 测试 | `cargo test --workspace`：协议序列化往返/能力字段、状态存储原子写/容错、健康检测状态机（降级/回退/自动重启用/Idle/过期世代）、日志保留清理等单测 |
 | 代码质量 | `cargo clippy --workspace --all-targets` 零警告 |
@@ -305,14 +305,14 @@ bypass-tool/
 $env:Path = "$env:USERPROFILE\.cargo\bin;" + $env:Path
 cargo build
 # 调试运行 core（控制台模式，不需装服务）
-.\target\debug\bypass-core.exe --console
+.\target\debug\route-tool-core.exe --console
 # 另一终端运行 UI
-.\target\debug\bypass-ui.exe
+.\target\debug\route-tool-ui.exe
 ```
 
 服务模式（管理员 PowerShell）：
 
 ```powershell
-.\target\release\bypass-core.exe --install-service
-net start BypassToolCore
+.\target\release\route-tool-core.exe --install-service
+net start RouteToolCore
 ```

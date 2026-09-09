@@ -3,8 +3,8 @@
 ; （CI 中由 .github/workflows/release.yml 传入版本号；未传时回退到 0.1.0）
 ;
 ; 安装过程：
-;   1. 复制 bypass-core.exe / bypass-ui.exe 到 {app}
-;   2. 执行 bypass-core.exe --install-service 注册 Windows 服务
+;   1. 复制 route-tool-core.exe / route-tool-ui.exe 到 {app}
+;   2. 执行 route-tool-core.exe --install-service 注册 Windows 服务
 ;   3. 启动 RouteToolCore 服务
 ; 卸载过程：
 ;   1. 停止并删除服务
@@ -16,9 +16,13 @@
 
 #define MyAppName "RouteTool"
 #define MyAppPublisher "RouteTool"
-#define MyAppExeName "bypass-ui.exe"
-#define CoreExeName "bypass-core.exe"
+#define MyAppExeName "route-tool-ui.exe"
+#define CoreExeName "route-tool-core.exe"
 #define ServiceName "RouteToolCore"
+; 升级兼容：旧版本（v0.1.13 及以前）使用 bypass-ui.exe / bypass-core.exe，
+; 在 uninstall 与 prepare-to-install 中清理掉，避免残留 exe 占用 lock 干扰升级。
+#define LegacyUiExe "bypass-ui.exe"
+#define LegacyCoreExe "bypass-core.exe"
 
 [Setup]
 AppId={{7C1E4E8A-9B2F-4D6A-A5C3-1F0E2D3B4A5C}
@@ -50,10 +54,10 @@ Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 
 [Files]
 ; ignoreversion: 总是覆盖（升级时替换旧 exe，不依赖版本比较）。
-; restartreplace: 若目标文件正被占用（如服务仍在运行锁住 bypass-core.exe），
+; restartreplace: 若目标文件正被占用（如服务仍在运行锁住 route-tool-core.exe），
 ;   标记为"重启后替换"而不是静默跳过，避免升级后仍跑旧二进制。
-Source: "..\target\x86_64-pc-windows-msvc\release\bypass-core.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace
-Source: "..\target\x86_64-pc-windows-msvc\release\bypass-ui.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace
+Source: "..\target\x86_64-pc-windows-msvc\release\{#CoreExeName}"; DestDir: "{app}"; Flags: ignoreversion restartreplace
+Source: "..\target\x86_64-pc-windows-msvc\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion restartreplace
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -61,7 +65,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "autostart"; Description: "开机自动启动 bypass-ui 托盘"; GroupDescription: "其他选项："; Flags: unchecked
+Name: "autostart"; Description: "开机自动启动 route-tool-ui 托盘"; GroupDescription: "其他选项："; Flags: unchecked
 
 [Run]
 ; 清理旧版本遗留服务（v0.1.3 及之前服务名为 BypassToolCore）：
@@ -84,6 +88,8 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
 ; 卸载顺序很关键：先杀 UI（否则托盘进程持有文件锁），再停服务，
 ; 服务停不掉就强杀 core 进程（否则 exe 被锁、文件删不掉 = 卸载不干净），
 ; 最后删除服务注册。
+Filename: "taskkill"; Parameters: "/F /IM {#LegacyUiExe}"; Flags: runhidden; RunOnceId: "KillLegacyUI"
+Filename: "taskkill"; Parameters: "/F /IM {#LegacyCoreExe}"; Flags: runhidden; RunOnceId: "KillLegacyCore"
 Filename: "taskkill"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden; RunOnceId: "KillUI"
 Filename: "sc"; Parameters: "stop {#ServiceName}"; Flags: runhidden; RunOnceId: "StopSvc"
 Filename: "taskkill"; Parameters: "/F /IM {#CoreExeName}"; Flags: runhidden; RunOnceId: "KillCore"
@@ -93,7 +99,7 @@ Filename: "{app}\{#CoreExeName}"; Parameters: "--uninstall-service"; Flags: runh
 ; 卸载时不清理 %ProgramData%\RouteTool（保留用户配置与日志）
 
 [Registry]
-; 开机自启 bypass-ui（HKEY_CURRENT_USER，卸载时删除）
+; 开机自启 route-tool-ui（HKEY_CURRENT_USER，卸载时删除）
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "RouteToolUI"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Code]
@@ -147,19 +153,21 @@ end;
 // 毫秒级等待（Inno 脚本内没有内置 Sleep，直接引入 kernel32 的）。
 procedure WaitMs(Ms: Integer); external 'Sleep@kernel32.dll stdcall';
 
-// 升级安装前先清场：正在运行的 bypass-ui 会锁住 exe 导致复制文件失败，
-// 服务没停就覆盖 bypass-core 同理。这里杀进程 + 停服务，失败不中断安装
+// 升级安装前先清场：正在运行的 route-tool-ui 会锁住 exe 导致复制文件失败，
+// 服务没停就覆盖 route-tool-core 同理。这里杀进程 + 停服务，失败不中断安装
 // （可能本来就没在运行）。sc stop 是异步的，等待服务真正停下来。
 procedure PrepareToInstallCleanup();
 var
   ResultCode: Integer;
   I: Integer;
 begin
+  Exec('taskkill', '/F /IM {#LegacyUiExe}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM {#LegacyCoreExe}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ServiceExists() then
   begin
     Exec('sc', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    // sc stop 返回不代表服务进程已退出，且进程退出前 bypass-core.exe 仍被
+    // sc stop 返回不代表服务进程已退出，且进程退出前 route-tool-core.exe 仍被
     // 文件锁占用，直接复制会失败或被跳过。这里轮询等待服务真正停下
     // （最多 10 秒），而不是固定 sleep 2 秒，避免升级后仍残留旧二进制。
     for I := 0 to 9 do

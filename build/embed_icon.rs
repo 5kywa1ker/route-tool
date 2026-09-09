@@ -84,7 +84,7 @@ fn find_rc_exe() -> Option<PathBuf> {
                     .and_then(Path::parent)
                     .and_then(Path::file_name)
                     .map(|s| s.to_string_lossy().into_owned())
-                    .filter(|s| s.chars().next().map_or(false, |c| c.is_ascii_digit()))
+                    .filter(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
                     .unwrap_or_default();
                 candidates.push((version, p));
             }

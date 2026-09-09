@@ -1,6 +1,6 @@
-# Bypass Tool - Route Overlay + Adapter Reconfig
+# RouteTool - Route Overlay + Adapter Reconfig
 
-Rust workspace per README.md. Two binaries: `bypass-core` (Windows service, SYSTEM) and `bypass-ui` (tray + slint window, user perms), IPC over named pipe JSON-RPC.
+Rust workspace per README.md. Two binaries: `route-tool-core` (Windows service, SYSTEM) and `route-tool-ui` (tray + slint window, user perms), IPC over named pipe JSON-RPC.
 
 ## Build
 
@@ -23,10 +23,10 @@ crates/
   core-lib/       # traits: SwitchStrategy, NetInspector; health monitor state machine; state store
   core-win/       # windows-rs impls: IP Helper (Create/DeleteIpForwardEntry2, GetIpForwardTable2),
                   #   adapter reconfig (netsh static IP, DNS), ICMP ping, adapter listing
-  core-bin/       # bypass-core.exe: windows-service host + tokio named-pipe IPC server (hardened pipe DACL)
+  core-bin/       # route-tool-core.exe: windows-service host + tokio named-pipe IPC server (hardened pipe DACL)
   ipc-protocol/   # serde types: requests/responses/events (GetStatus, EnableBypass, HealthEvent push...)
-  ui-bin/         # bypass-ui.exe: tray-icon + tao + slint settings window; toast notifications
-installer/        # Inno Setup .iss (runs bypass-core.exe --install-service during install)
+  ui-bin/         # route-tool-ui.exe: tray-icon + tao + slint settings window; toast notifications
+installer/        # Inno Setup .iss (runs route-tool-core.exe --install-service during install)
 .github/workflows/release.yml   # tag v* -> build -> iscc -> gh-release
 ```
 

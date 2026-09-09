@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "bypass-core"
+name = "route-tool-core"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,10 +1,10 @@
-//! bypass-core.exe：Windows 服务宿主 + Named Pipe IPC server。
+//! route-tool-core.exe：Windows 服务宿主 + Named Pipe IPC server。
 //!
 //! 用法：
-//!   bypass-core.exe                     服务模式（由 SCM 启动）
-//!   bypass-core.exe --install-service   安装服务（需管理员）
-//!   bypass-core.exe --uninstall-service 卸载服务（需管理员）
-//!   bypass-core.exe --console           控制台调试模式（不走 SCM）
+//!   route-tool-core.exe                     服务模式（由 SCM 启动）
+//!   route-tool-core.exe --install-service   安装服务（需管理员）
+//!   route-tool-core.exe --uninstall-service 卸载服务（需管理员）
+//!   route-tool-core.exe --console           控制台调试模式（不走 SCM）
 
 mod controller;
 mod ipc_server;
@@ -25,7 +25,7 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let store = core_lib::state_store::StateStore::default();
     let _ = store.ensure_dirs();
     let dir = store.base_dir().join("logs");
-    let appender = tracing_appender::rolling::daily(dir, "bypass-core.log");
+    let appender = tracing_appender::rolling::daily(dir, "route-tool-core.log");
     let (writer, guard) = tracing_appender::non_blocking(appender);
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -54,7 +54,10 @@ pub async fn run_core(mut stop_rx: mpsc::Receiver<()>) {
     let state = Arc::new(ServerState::new(controller));
 
     // 日志保留巡检：启动时清一次过期日志，此后每 24 小时一次（§2：保留 7 天）。
-    core_lib::log_prune::spawn_daily_prune(store.base_dir().join("logs"), "bypass-core.log".into());
+    core_lib::log_prune::spawn_daily_prune(
+        store.base_dir().join("logs"),
+        "route-tool-core.log".into(),
+    );
 
     // 启动一致性校验。
     if let Err(e) = state.controller.reconcile_on_startup().await {

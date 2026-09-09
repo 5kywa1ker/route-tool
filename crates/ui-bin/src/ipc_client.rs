@@ -99,6 +99,12 @@ impl IpcClient {
             .map(|_| ())
     }
 
+    /// 探测从本机到达 `ip` 的连通性。
+    ///
+    /// 当前 UI 上一键「测试连通性」按钮已移除（用户要求首页只保留状态信息）。
+    /// 保留此 IPC 客户端方法以备配置向导、远程脚本等场景后续直接调用，
+    /// 服务端 `TestConnectivity` 仍然在线（§5.1 首次配置向导可选接入此能力）。
+    #[allow(dead_code)]
     pub async fn test_connectivity(&mut self, ip: std::net::IpAddr) -> Result<bool, String> {
         let v = self
             .send_request(method::TEST_CONNECTIVITY, serde_json::json!(ip))

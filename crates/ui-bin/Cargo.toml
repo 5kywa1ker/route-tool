@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "bypass-ui"
+name = "route-tool-ui"
 path = "src/main.rs"
 
 [dependencies]

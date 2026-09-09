@@ -1,4 +1,11 @@
 // RouteTool 设置窗口 —— 侧边栏多页面布局（首页 / 配置 / 日志 / 关于）。
+//
+// 排版原则（整体收紧）：
+//   - 窗口 720×520 / 最小 660×460；左侧栏 140；页面 padding 14；card padding 12。
+//   - 等宽：配置页 ModeCard 横向 stretch 1:1；首页 StatItem stretch 1:1。
+//   - 状态显示组件统一由 main.rs 的轮询定时器刷新；
+//     「切换到首页 / 窗口重新可见 / 启用-禁用切换」三个时机会主动触发
+//     refresh-adapters 回调，让首页下方网卡信息即时同步。
 
 import { Button, ComboBox, LineEdit, SpinBox, CheckBox, ScrollView } from "std-widgets.slint";
 
@@ -29,13 +36,13 @@ export struct LogEntry {
 component Card {
     Rectangle {
         background: Theme.card-gray;
-        border-radius: 12px;
+        border-radius: 10px;
         border-width: 1px;
         border-color: Theme.border-gray;
         drop-shadow-offset-x: 0;
-        drop-shadow-offset-y: 2px;
-        drop-shadow-blur: 6px;
-        drop-shadow-color: #00000008;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-blur: 4px;
+        drop-shadow-color: #00000006;
         @children
     }
 }
@@ -46,19 +53,19 @@ component ToggleSwitch {
     callback toggled();
 
     HorizontalLayout {
-        spacing: 8px;
+        spacing: 6px;
         alignment: center;
         Rectangle {
-            width: 44px;
-            height: 24px;
-            border-radius: 12px;
-            background: root.checked ? Theme.accent-blue : #c4c4c4;
+            width: 38px;
+            height: 22px;
+            border-radius: 11px;
+            background: root.checked ? Theme.accent-blue : #c8c8c8;
             Rectangle {
-                x: root.checked ? 22px : 2px;
+                x: root.checked ? 18px : 2px;
                 y: 2px;
-                width: 20px;
-                height: 20px;
-                border-radius: 10px;
+                width: 18px;
+                height: 18px;
+                border-radius: 9px;
                 background: #ffffff;
                 animate x { duration: 150ms; easing: ease-in-out; }
             }
@@ -71,7 +78,7 @@ component ToggleSwitch {
         }
         Text {
             text: root.text;
-            font-size: 13px;
+            font-size: 12px;
             color: Theme.text-primary;
             vertical-alignment: center;
         }
@@ -82,10 +89,10 @@ component FormRow {
     in property <string> label;
 
     VerticalLayout {
-        spacing: 4px;
+        spacing: 3px;
         Text {
             text: root.label;
-            font-size: 12px;
+            font-size: 11px;
             color: Theme.text-secondary;
         }
         @children
@@ -103,10 +110,12 @@ component StatItem {
         border-radius: 8px;
         border-width: 1px;
         border-color: Theme.border-gray;
-        min-width: 120px;
         VerticalLayout {
-            padding: 12px;
-            spacing: 4px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            padding-left: 12px;
+            padding-right: 12px;
+            spacing: 3px;
             Text {
                 text: root.label;
                 font-size: 11px;
@@ -114,7 +123,7 @@ component StatItem {
             }
             Text {
                 text: root.value;
-                font-size: 18px;
+                font-size: 16px;
                 font-weight: 600;
                 color: root.value-color;
             }
@@ -155,35 +164,37 @@ component ModeCard {
     callback clicked();
 
     Rectangle {
-        min-width: 180px;
         background: root.selected ? #e8f4fd : #ffffff;
         border-radius: 10px;
         border-width: root.selected ? 2px : 1px;
         border-color: root.selected ? Theme.accent-blue : Theme.border-gray;
         VerticalLayout {
-            padding: 14px;
-            spacing: 8px;
+            padding-top: 10px;
+            padding-bottom: 4px;
+            padding-left: 12px;
+            padding-right: 12px;
+            spacing: 4px;
             HorizontalLayout {
-                spacing: 10px;
+                spacing: 8px;
                 alignment: start;
                 Rectangle {
-                    width: 32px;
-                    height: 32px;
+                    width: 26px;
+                    height: 26px;
                     background: root.selected ? #ffffff : Theme.bg-gray;
                     border-radius: 6px;
                     Path {
-                        x: 4px;
-                        y: 4px;
-                        width: 24px;
-                        height: 24px;
+                        x: 3px;
+                        y: 3px;
+                        width: 20px;
+                        height: 20px;
                         fill: root.selected ? Theme.accent-blue : Theme.text-secondary;
                         viewbox-x: 0;
                         viewbox-y: 0;
                         viewbox-width: 24;
                         viewbox-height: 24;
                         commands: root.icon-name == "stack"
-                            ? "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"
-                            : "M4 16v2h16v-2H4zm0-6v2h16v-2H4zm0-6v2h16V4H4z";
+                            ? "M12 3 4 8v8l8 4 8-4V8l-8-5zm0 2.5L17 8 12 10.5 7 8l5-2.5zM7 10l4 2v5l-4-2v-5zm10 0v5l-4 2v-5l4-2z"
+                            : "M4 6h2v12H4V6zm5-2h2v16H9V4zm5 4h2v12h-2V8zm5 6h2v6h-2v-6z";
                     }
                 }
                 VerticalLayout {
@@ -191,7 +202,7 @@ component ModeCard {
                     alignment: center;
                     Text {
                         text: root.title;
-                        font-size: 14px;
+                        font-size: 13px;
                         font-weight: 600;
                         color: Theme.text-primary;
                     }
@@ -199,13 +210,15 @@ component ModeCard {
                         text: root.desc;
                         font-size: 11px;
                         color: Theme.text-secondary;
+                        wrap: word-wrap;
                     }
                 }
             }
             if root.selected: Text {
                 text: "已选择";
-                font-size: 11px;
+                font-size: 10px;
                 color: Theme.accent-blue;
+                horizontal-alignment: right;
             }
         }
         TouchArea {
@@ -223,27 +236,27 @@ component RouteOverlayCard {
         border-width: 1px;
         border-color: Theme.border-gray;
         VerticalLayout {
-            padding: 16px;
-            spacing: 12px;
+            padding: 12px;
+            spacing: 8px;
             HorizontalLayout {
-                spacing: 12px;
+                spacing: 10px;
                 alignment: start;
                 Rectangle {
-                    width: 40px;
-                    height: 40px;
+                    width: 32px;
+                    height: 32px;
                     background: #e8f4fd;
                     border-radius: 8px;
                     Path {
-                        x: 8px;
-                        y: 8px;
-                        width: 24px;
-                        height: 24px;
+                        x: 6px;
+                        y: 6px;
+                        width: 20px;
+                        height: 20px;
                         fill: Theme.accent-blue;
                         viewbox-x: 0;
                         viewbox-y: 0;
                         viewbox-width: 24;
                         viewbox-height: 24;
-                        commands: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5";
+                        commands: "M12 3 4 8v8l8 4 8-4V8l-8-5zm0 2.5L17 8 12 10.5 7 8l5-2.5zM7 10l4 2v5l-4-2v-5zm10 0v5l-4 2v-5l4-2z";
                     }
                 }
                 VerticalLayout {
@@ -251,19 +264,19 @@ component RouteOverlayCard {
                     alignment: center;
                     Text {
                         text: "路由叠加";
-                        font-size: 14px;
+                        font-size: 13px;
                         font-weight: 600;
                         color: Theme.text-primary;
                     }
                     Text {
                         text: "通过旁路由 IP 进行流量转发";
-                        font-size: 12px;
+                        font-size: 11px;
                         color: Theme.text-secondary;
                     }
                 }
             }
             HorizontalLayout {
-                spacing: 8px;
+                spacing: 6px;
                 Text {
                     text: "旁路由 IP：";
                     font-size: 12px;
@@ -292,27 +305,27 @@ component AdapterReconfigCard {
         border-width: 1px;
         border-color: Theme.border-gray;
         VerticalLayout {
-            padding: 16px;
-            spacing: 12px;
+            padding: 12px;
+            spacing: 10px;
             HorizontalLayout {
-                spacing: 12px;
+                spacing: 10px;
                 alignment: start;
                 Rectangle {
-                    width: 40px;
-                    height: 40px;
+                    width: 32px;
+                    height: 32px;
                     background: #f0f9e8;
                     border-radius: 8px;
                     Path {
-                        x: 8px;
-                        y: 8px;
-                        width: 24px;
-                        height: 24px;
+                        x: 6px;
+                        y: 6px;
+                        width: 20px;
+                        height: 20px;
                         fill: Theme.success;
                         viewbox-x: 0;
                         viewbox-y: 0;
                         viewbox-width: 24;
                         viewbox-height: 24;
-                        commands: "M4 16v2h16v-2H4zm0-6v2h16v-2H4zm0-6v2h16V4H4z";
+                        commands: "M4 6h2v12H4V6zm5-2h2v16H9V4zm5 4h2v12h-2V8zm5 6h2v6h-2v-6z";
                     }
                 }
                 VerticalLayout {
@@ -320,29 +333,24 @@ component AdapterReconfigCard {
                     alignment: center;
                     Text {
                         text: "网卡直改";
-                        font-size: 14px;
+                        font-size: 13px;
                         font-weight: 600;
                         color: Theme.text-primary;
                     }
                     Text {
                         text: "修改网卡 IP、网关、DNS 指向旁路由";
-                        font-size: 12px;
+                        font-size: 11px;
                         color: Theme.text-secondary;
                     }
                 }
             }
-            VerticalLayout {
-                spacing: 10px;
-                HorizontalLayout {
-                    spacing: 12px;
-                    InfoRow { label: "网卡 IP"; value: root.ip; }
-                    InfoRow { label: "子网掩码"; value: root.mask; }
-                }
-                HorizontalLayout {
-                    spacing: 12px;
-                    InfoRow { label: "网关"; value: root.gateway; }
-                    InfoRow { label: "DNS"; value: root.dns; }
-                }
+            // GridLayout 在 24 网格下自然形成 2×2，四项信息均匀铺开。
+            GridLayout {
+                spacing: 14px;
+                InfoRow { label: "网卡 IP"; value: root.ip; col: 0; row: 0; }
+                InfoRow { label: "子网掩码"; value: root.mask; col: 1; row: 0; }
+                InfoRow { label: "网关"; value: root.gateway; col: 0; row: 1; }
+                InfoRow { label: "DNS"; value: root.dns; col: 1; row: 1; }
             }
         }
     }
@@ -355,16 +363,19 @@ component SidebarItem {
     callback clicked();
 
     Rectangle {
-        height: 38px;
+        height: 32px;
         background: root.selected ? #e8f4fd : transparent;
         border-radius: 6px;
         HorizontalLayout {
-            padding: 8px;
-            spacing: 10px;
+            padding-top: 6px;
+            padding-bottom: 6px;
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 8px;
             alignment: start;
             Path {
-                width: 18px;
-                height: 18px;
+                width: 16px;
+                height: 16px;
                 fill: root.selected ? Theme.accent-blue : Theme.text-secondary;
                 viewbox-x: 0;
                 viewbox-y: 0;
@@ -374,7 +385,7 @@ component SidebarItem {
             }
             Text {
                 text: root.label;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: root.selected ? 600 : 400;
                 color: root.selected ? Theme.accent-blue : Theme.text-secondary;
                 vertical-alignment: center;
@@ -386,6 +397,9 @@ component SidebarItem {
     }
 }
 
+// ------------------------------------------------------------------
+// Pages
+// ------------------------------------------------------------------
 component HomePage {
     in property <string> status-text;
     in property <color> status-color;
@@ -399,34 +413,29 @@ component HomePage {
     in property <string> adapter-mask;
     in property <string> adapter-gateway;
     in property <string> adapter-dns;
-    in property <string> test-result;
     callback toggle();
-    callback test-connectivity();
     callback switch-mode();
 
     ScrollView {
         VerticalLayout {
-            padding: 0px;
-            spacing: 16px;
-
-            Text {
-                text: "首页";
-                font-size: 20px;
-                font-weight: 600;
-                color: Theme.text-primary;
-            }
+            padding-top: 0px;
+            padding-bottom: 0px;
+            padding-left: 0px;
+            // 为 scrollbar 预留位置（Windows 上原生 scrollbar 几像素宽会与内容重叠）
+            padding-right: 12px;
+            spacing: 12px;
 
             Card {
                 VerticalLayout {
-                    padding: 16px;
-                    spacing: 14px;
+                    padding: 12px;
+                    spacing: 10px;
                     HorizontalLayout {
-                        spacing: 10px;
+                        spacing: 8px;
                         alignment: start;
                         Rectangle {
-                            width: 12px;
-                            height: 12px;
-                            border-radius: 6px;
+                            width: 10px;
+                            height: 10px;
+                            border-radius: 5px;
                             background: root.status-color;
                             drop-shadow-offset-x: 0;
                             drop-shadow-offset-y: 0;
@@ -437,13 +446,13 @@ component HomePage {
                             spacing: 2px;
                             Text {
                                 text: root.status-text;
-                                font-size: 16px;
+                                font-size: 14px;
                                 font-weight: 600;
                                 color: Theme.text-primary;
                             }
                             Text {
                                 text: root.is-enabled ? "当前流量已通过旁路由" : "当前为直连状态";
-                                font-size: 12px;
+                                font-size: 11px;
                                 color: Theme.text-secondary;
                             }
                         }
@@ -458,47 +467,38 @@ component HomePage {
                     }
 
                     HorizontalLayout {
-                        spacing: 12px;
+                        spacing: 10px;
                         StatItem {
                             label: "延迟";
                             value: root.latency-ms >= 0 ? root.latency-ms + " ms" : "--";
                             sub-value: root.is-enabled ? "旁路由" : "";
+                            horizontal-stretch: 1;
                         }
                         StatItem {
-                            label: "网络连通性";
+                            label: "连通性";
                             value: root.is-fallback ? "异常" : (root.is-enabled ? "正常" : "--");
                             value-color: root.is-fallback ? Theme.error : (root.is-enabled ? Theme.success : Theme.text-secondary);
                             sub-value: root.is-enabled ? "检测中" : "";
+                            horizontal-stretch: 1;
                         }
                         StatItem {
                             label: "上次检测";
                             value: root.last-check-text;
                             sub-value: "";
+                            horizontal-stretch: 1;
                         }
-                    }
-
-                    Button {
-                        text: "测试连通性";
-                        primary: false;
-                        clicked => { root.test-connectivity(); }
-                    }
-                    if root.test-result != "": Text {
-                        text: root.test-result;
-                        font-size: 11px;
-                        color: Theme.text-secondary;
-                        wrap: word-wrap;
                     }
                 }
             }
 
             Card {
                 VerticalLayout {
-                    padding: 16px;
-                    spacing: 14px;
+                    padding: 12px;
+                    spacing: 8px;
                     HorizontalLayout {
                         Text {
                             text: "当前模式";
-                            font-size: 15px;
+                            font-size: 13px;
                             font-weight: 600;
                             color: Theme.text-primary;
                         }
@@ -506,7 +506,7 @@ component HomePage {
                             alignment: end;
                             Text {
                                 text: "切换模式";
-                                font-size: 12px;
+                                font-size: 11px;
                                 color: Theme.accent-blue;
                                 TouchArea {
                                     clicked => { root.switch-mode(); }
@@ -559,23 +559,26 @@ component ConfigPage {
 
     ScrollView {
         VerticalLayout {
-            padding: 0px;
-            spacing: 16px;
+            padding-top: 0px;
+            padding-bottom: 0px;
+            padding-left: 0px;
+            padding-right: 12px;
+            spacing: 12px;
 
             Text {
                 text: "配置";
-                font-size: 20px;
+                font-size: 16px;
                 font-weight: 600;
                 color: Theme.text-primary;
             }
 
             Card {
                 VerticalLayout {
-                    padding: 16px;
-                    spacing: 12px;
+                    padding: 12px;
+                    spacing: 10px;
                     Text {
                         text: "选择模式";
-                        font-size: 14px;
+                        font-size: 13px;
                         font-weight: 600;
                         color: Theme.text-primary;
                     }
@@ -583,16 +586,18 @@ component ConfigPage {
                         spacing: 12px;
                         ModeCard {
                             title: "路由叠加";
-                            desc: "通过旁路由 IP 进行流量转发";
+                            desc: "通过旁路由 IP 转发流量";
                             icon-name: "stack";
                             selected: root.mode-index == 0;
+                            horizontal-stretch: 1;
                             clicked => { root.mode-index = 0; }
                         }
                         ModeCard {
                             title: "网卡直改";
-                            desc: "修改网卡 IP、网关、DNS";
+                            desc: "修改网卡 IP / 网关 / DNS";
                             icon-name: "adapter";
                             selected: root.mode-index == 1;
+                            horizontal-stretch: 1;
                             clicked => { root.mode-index = 1; }
                         }
                     }
@@ -601,11 +606,11 @@ component ConfigPage {
 
             Card {
                 VerticalLayout {
-                    padding: 16px;
-                    spacing: 14px;
+                    padding: 12px;
+                    spacing: 10px;
                     Text {
                         text: root.mode-index == 0 ? "旁路由设置" : "网卡直改设置";
-                        font-size: 14px;
+                        font-size: 13px;
                         font-weight: 600;
                         color: Theme.text-primary;
                     }
@@ -628,7 +633,7 @@ component ConfigPage {
                     }
 
                     if root.mode-index == 1: VerticalLayout {
-                        spacing: 12px;
+                        spacing: 8px;
                         FormRow {
                             label: "网卡静态 IP";
                             LineEdit {
@@ -656,11 +661,11 @@ component ConfigPage {
 
             Card {
                 VerticalLayout {
-                    padding: 16px;
-                    spacing: 14px;
+                    padding: 12px;
+                    spacing: 8px;
                     Text {
                         text: "高级选项";
-                        font-size: 14px;
+                        font-size: 13px;
                         font-weight: 600;
                         color: Theme.text-primary;
                     }
@@ -693,13 +698,13 @@ component ConfigPage {
 
             if root.config-error != "": Text {
                 text: root.config-error;
-                font-size: 12px;
+                font-size: 11px;
                 color: Theme.error;
                 wrap: word-wrap;
             }
 
             HorizontalLayout {
-                spacing: 12px;
+                spacing: 10px;
                 Button {
                     text: "恢复默认";
                     primary: false;
@@ -715,22 +720,29 @@ component ConfigPage {
     }
 }
 
+// LogRow 自适应高度：把单条日志 message 文本换行后整个行条按内容增高，
+// 避免原来固定 26px 高度遮住 wrap 文本的问题。
 component LogRow {
     in property <string> time;
     in property <string> level;
     in property <string> message;
+    in property <int> row-index;
 
     Rectangle {
-        height: 26px;
-        background: #ffffff;
+        background: Math.mod(row-index, 2) == 0 ? #ffffff : #fafafa;
+        min-height: 22px;
         HorizontalLayout {
-            padding: 4px;
+            padding-top: 4px;
+            padding-bottom: 4px;
+            padding-left: 6px;
+            padding-right: 6px;
             spacing: 8px;
             Text {
                 text: root.time;
                 font-size: 11px;
                 color: Theme.text-tertiary;
-                width: 80px;
+                width: 64px;
+                vertical-alignment: center;
             }
             Text {
                 text: root.level;
@@ -739,13 +751,16 @@ component LogRow {
                 color: root.level == "ERROR" ? Theme.error
                     : (root.level == "WARN" ? Theme.warning
                     : (root.level == "INFO" ? Theme.accent-blue : Theme.text-secondary));
-                width: 50px;
+                width: 40px;
+                vertical-alignment: center;
             }
             Text {
                 text: root.message;
                 font-size: 11px;
                 color: Theme.text-primary;
                 wrap: word-wrap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
             }
         }
     }
@@ -758,44 +773,81 @@ component LogsPage {
 
     VerticalLayout {
         padding: 0px;
-        spacing: 16px;
+        spacing: 12px;
 
         HorizontalLayout {
             Text {
                 text: "日志";
-                font-size: 20px;
+                font-size: 16px;
                 font-weight: 600;
                 color: Theme.text-primary;
+                vertical-alignment: center;
             }
             HorizontalLayout {
                 alignment: end;
-                spacing: 8px;
-                Button {
-                    text: "刷新";
-                    primary: false;
-                    clicked => { root.refresh(); }
+                spacing: 6px;
+                // 紧凑风格按钮：自定义 padding + 字号，比 std Button 更小巧。
+                Rectangle {
+                    height: 26px;
+                    background: Theme.bg-gray;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.border-gray;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        alignment: center;
+                        Text {
+                            text: "刷新";
+                            font-size: 11px;
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    TouchArea {
+                        clicked => { root.refresh(); }
+                    }
                 }
-                Button {
-                    text: "打开日志目录";
-                    primary: false;
-                    clicked => { root.open-logs(); }
+                Rectangle {
+                    height: 26px;
+                    background: Theme.bg-gray;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.border-gray;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        alignment: center;
+                        Text {
+                            text: "打开日志目录";
+                            font-size: 11px;
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    TouchArea {
+                        clicked => { root.open-logs(); }
+                    }
                 }
             }
         }
 
         Card {
+            // 高度按窗口可用空间分配：卡片不留多余 padding，让滚动区占满。
             VerticalLayout {
                 padding: 0px;
                 spacing: 0px;
                 ScrollView {
-                    height: 440px;
+                    height: 380px;
                     VerticalLayout {
-                        padding: 12px;
-                        spacing: 2px;
-                        for entry in root.log-entries: LogRow {
+                        padding: 6px;
+                        padding-right: 12px;
+                        spacing: 0px;
+                        for entry[idx] in root.log-entries: LogRow {
                             time: entry.time;
                             level: entry.level;
                             message: entry.message;
+                            row-index: idx;
                         }
                     }
                 }
@@ -808,85 +860,76 @@ component AboutPage {
     in property <string> version-text;
     callback check-update();
 
-    ScrollView {
-        VerticalLayout {
-            padding: 0px;
-            spacing: 16px;
+    VerticalLayout {
+        padding: 0px;
+        spacing: 16px;
 
+        HorizontalLayout {
+            // 右上角对齐的「检查更新」按钮（高度与小标题同高）
+            Rectangle {
+                height: 28px;
+                width: 110px;
+                background: Theme.accent-blue;
+                border-radius: 6px;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    alignment: center;
+                    Text {
+                        text: "检查更新";
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: #ffffff;
+                        vertical-alignment: center;
+                    }
+                }
+                TouchArea {
+                    clicked => { root.check-update(); }
+                }
+            }
+        }
+
+        VerticalLayout {
+            spacing: 12px;
+            alignment: center;
+
+            // 直接以 256×256 source 缩放到 72×72，画质比 24 viewBox 矢量图更稳。
+            Image {
+                source: @image-url("../../../assets/app.png");
+                width: 72px;
+                height: 72px;
+            }
             Text {
-                text: "关于";
-                font-size: 20px;
+                text: "RouteTool";
+                font-size: 18px;
                 font-weight: 600;
                 color: Theme.text-primary;
+                horizontal-alignment: center;
             }
-
-            Card {
-                VerticalLayout {
-                    padding: 24px;
-                    spacing: 16px;
-                    alignment: center;
-                    Rectangle {
-                        width: 64px;
-                        height: 64px;
-                        background: Theme.accent-blue;
-                        border-radius: 14px;
-                        Text {
-                            text: "R";
-                            color: #ffffff;
-                            font-size: 32px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                    Text {
-                        text: "RouteTool";
-                        font-size: 20px;
-                        font-weight: 600;
-                        color: Theme.text-primary;
-                    }
-                    Text {
-                        text: root.version-text;
-                        font-size: 13px;
-                        color: Theme.text-secondary;
-                    }
-                    Text {
-                        text: "Windows 桌面旁路由一键切换工具。支持路由叠加与网卡直改两种模式，具备旁路由异常自动侦测与回退能力。";
-                        font-size: 12px;
-                        color: Theme.text-secondary;
-                        wrap: word-wrap;
-                        horizontal-alignment: center;
-                    }
-                    Button {
-                        text: "检查更新";
-                        primary: true;
-                        clicked => { root.check-update(); }
-                    }
-                }
+            Text {
+                text: root.version-text;
+                font-size: 12px;
+                color: Theme.text-secondary;
+                horizontal-alignment: center;
             }
-
-            Card {
-                VerticalLayout {
-                    padding: 16px;
-                    spacing: 10px;
-                    Text {
-                        text: "开源与许可";
-                        font-size: 14px;
-                        font-weight: 600;
-                        color: Theme.text-primary;
-                    }
-                    Text {
-                        text: "本项目采用 MIT 许可证开源。";
-                        font-size: 12px;
-                        color: Theme.text-secondary;
-                    }
-                    Text {
-                        text: "GitHub: https://github.com/5kywa1ker/route-tool";
-                        font-size: 12px;
-                        color: Theme.accent-blue;
-                        wrap: word-wrap;
-                    }
-                }
+            Text {
+                text: "Windows 桌面旁路由一键切换工具。支持路由叠加与网卡直改两种模式，具备旁路由异常自动侦测与回退能力。";
+                font-size: 12px;
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "本项目采用 MIT 许可证开源";
+                font-size: 11px;
+                color: Theme.text-tertiary;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "github.com/5kywa1ker/route-tool";
+                font-size: 11px;
+                color: Theme.accent-blue;
+                horizontal-alignment: center;
             }
         }
     }
@@ -898,10 +941,10 @@ component AboutPage {
 export component AppWindow inherits Window {
     title: "RouteTool 旁路由切换工具";
     icon: @image-url("../../../assets/app.png");
-    preferred-width: 840px;
-    preferred-height: 600px;
-    min-width: 760px;
-    min-height: 520px;
+    preferred-width: 720px;
+    preferred-height: 520px;
+    min-width: 660px;
+    min-height: 460px;
 
     in property <string> status-text: "未连接到核心服务";
     in property <bool> is-enabled: false;
@@ -928,62 +971,54 @@ export component AppWindow inherits Window {
     in-out property <int> failure-threshold: 3;
     in-out property <bool> auto-reenable: false;
     in-out property <bool> notifications: true;
-    in property <string> test-result: "";
     in property <string> config-error: "";
 
     in property <[LogEntry]> log-entries: [];
     in-out property <int> current-page: 0;
 
     callback toggle-bypass();
-    callback test-connectivity();
     callback save-config();
     callback open-logs();
     callback adapter-changed(int);
     callback restore-default();
     callback check-update();
     callback refresh-logs();
+    // 主动触发「拉取最新网卡列表 + 刷新首页下方卡片」
+    callback refresh-adapters();
 
     property <color> status-color: root.is-fallback ? Theme.error
         : (root.is-enabled ? Theme.success : Theme.text-secondary);
 
     HorizontalLayout {
         Rectangle {
-            width: 170px;
+            width: 140px;
             background: #ffffff;
 
             Rectangle {
-                x: 169px;
+                x: 139px;
                 width: 1px;
                 height: 100%;
                 background: Theme.border-gray;
             }
 
             VerticalLayout {
-                padding: 16px;
-                spacing: 8px;
+                padding: 12px;
+                spacing: 6px;
 
                 HorizontalLayout {
-                    spacing: 8px;
+                    spacing: 6px;
                     alignment: start;
-                    Rectangle {
-                        width: 28px;
-                        height: 28px;
-                        background: Theme.accent-blue;
-                        border-radius: 6px;
-                        Text {
-                            text: "R";
-                            color: #ffffff;
-                            font-size: 14px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+                    Image {
+                        source: @image-url("../../../assets/app.png");
+                        width: 26px;
+                        height: 26px;
                     }
                     VerticalLayout {
+                        spacing: 2px;
                         alignment: center;
                         Text {
                             text: "RouteTool";
-                            font-size: 15px;
+                            font-size: 13px;
                             font-weight: 600;
                             color: Theme.text-primary;
                         }
@@ -995,13 +1030,13 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Rectangle { height: 16px; }
+                Rectangle { height: 12px; }
 
                 SidebarItem {
                     icon-data: home-icon();
                     label: "首页";
                     selected: root.current-page == 0;
-                    clicked => { root.current-page = 0; }
+                    clicked => { root.current-page = 0; root.refresh-adapters(); }
                 }
                 SidebarItem {
                     icon-data: config-icon();
@@ -1024,10 +1059,10 @@ export component AppWindow inherits Window {
 
                 VerticalLayout {
                     alignment: end;
-                    spacing: 6px;
+                    spacing: 4px;
                     HorizontalLayout {
-                        spacing: 6px;
-                        alignment: center;
+                        spacing: 4px;
+                        alignment: start;
                         Rectangle {
                             width: 6px;
                             height: 6px;
@@ -1036,7 +1071,7 @@ export component AppWindow inherits Window {
                         }
                         Text {
                             text: root.service-status-text;
-                            font-size: 11px;
+                            font-size: 10px;
                             color: Theme.text-secondary;
                         }
                     }
@@ -1052,7 +1087,7 @@ export component AppWindow inherits Window {
         Rectangle {
             background: Theme.bg-gray;
             HorizontalLayout {
-                padding: 20px;
+                padding: 14px;
                 spacing: 0px;
 
                 if root.current-page == 0: HomePage {
@@ -1068,9 +1103,7 @@ export component AppWindow inherits Window {
                     adapter-mask: root.selected-adapter-mask;
                     adapter-gateway: root.selected-adapter-gateway;
                     adapter-dns: root.selected-adapter-dns;
-                    test-result: root.test-result;
                     toggle => { root.toggle-bypass(); }
-                    test-connectivity => { root.test-connectivity(); }
                     switch-mode => { root.current-page = 1; }
                 }
 
@@ -1106,8 +1139,9 @@ export component AppWindow inherits Window {
         }
     }
 
-    pure function home-icon() -> string { return "M12 3L4 9v11h6v-7h4v7h6V9L12 3z"; }
-    pure function config-icon() -> string { return "M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7m7.8-2.5l1.9.6.5 1.6-1.7 1.5-.1 1.9-2 .4-1.1 1.6-1.9-.7-1.8 1-1.4-1.4-1.9.7-1.1-1.6-2-.4-.1-1.9-1.7-1.5.5-1.6 1.9-.6.3-2-1.4-1.4 1.4-1.4-.3-2 1.9-.6-.5-1.6 1.7-1.5.1-1.9 2-.4 1.1-1.6 1.9.7 1.8-1 1.4 1.4 1.9-.7 1.1 1.6 2 .4.1 1.9 1.7 1.5-.5 1.6-1.9.6-.3 2 1.4 1.4-1.4 1.4z"; }
-    pure function logs-icon() -> string { return "M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"; }
-    pure function about-icon() -> string { return "M12 2a10 10 0 100 20 10 10 0 000-20zm1 15h-2v-6h2zm0-8h-2V7h2z"; }
+    // 24-grid Fluent 风格 SVG path。矢量在缩放下保持锐利，避免 HiDPI 下模糊。
+    pure function home-icon() -> string { return "M12 3l-9 8h2v9h5v-6h4v6h5v-9h2l-9-8z"; }
+    pure function config-icon() -> string { return "M19.4 13.5l1.8-1-1.8-3.1-2.1.6a7.4 7.4 0 0 0-1.4-.8l-.4-2.1h-3.6l-.4 2.1a7.4 7.4 0 0 0-1.4.8l-2.1-.6-1.8 3.1 1.8 1a7.6 7.6 0 0 0 0 1.5l-1.8 1 1.8 3.1 2.1-.6a7.4 7.4 0 0 0 1.4.8l.4 2.1h3.6l.4-2.1a7.4 7.4 0 0 0 1.4-.8l2.1.6 1.8-3.1-1.8-1a7.6 7.6 0 0 0 0-1.5zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"; }
+    pure function logs-icon() -> string { return "M5 4h14v2H5V4zm0 4h14v2H5V8zm0 4h10v2H5v-2zm0 4h14v2H5v-2z"; }
+    pure function about-icon() -> string { return "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"; }
 }

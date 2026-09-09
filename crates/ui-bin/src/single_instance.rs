@@ -1,4 +1,4 @@
-//! 单实例互斥：防止重复启动 bypass-ui 产生多个托盘图标。
+//! 单实例互斥：防止重复启动 route-tool-ui 产生多个托盘图标。
 //!
 //! 首个实例持有命名互斥体 `Local\RouteToolUI-Mutex`，并创建命名事件
 //! `Local\RouteToolUI-ShowEvent`。二次启动的进程检测到互斥体已存在时，

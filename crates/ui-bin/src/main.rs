@@ -1,4 +1,4 @@
-//! bypass-ui.exe：托盘 + 设置窗口。
+//! route-tool-ui.exe：托盘 + 设置窗口。
 
 // Windows：以 GUI 子系统链接，避免启动时闪一个黑色控制台窗口。
 // debug 构建保留控制台，方便直接看到 panic / 日志输出。
@@ -28,6 +28,15 @@ const DEFAULT_MASK: &str = "255.255.255.0";
 
 /// 日志目录。
 const CORE_LOG_DIR: &str = r"C:\ProgramData\RouteTool\logs";
+
+/// UI 日志滚动文件前缀（新名）。
+const UI_LOG_PREFIX_NEW: &str = "route-tool-ui";
+/// UI 日志滚动文件前缀（旧名，v0.1.13 及以前；用于保留历史日志可读）。
+const UI_LOG_PREFIX_OLD: &str = "bypass-ui";
+/// 核心日志滚动文件前缀（新名）。
+const CORE_LOG_PREFIX_NEW: &str = "route-tool-core";
+/// 核心日志滚动文件前缀（旧名）。
+const CORE_LOG_PREFIX_OLD: &str = "bypass-core";
 
 /// 解析 DNS 输入（逗号/分号/空白分隔），空输入返回 None。
 fn parse_dns_list(text: &str) -> Result<Option<Vec<std::net::IpAddr>>, String> {
@@ -245,20 +254,30 @@ fn apply_config_to_ui(app: &AppWindow, cfg: &AppConfig) {
 }
 
 /// 读取最近的日志文件，解析为 Slint 模型。
+///
+/// 同时读旧名（`bypass-*.log.YYYY-MM-DD`）与新名（`route-tool-*.log.YYYY-MM-DD`），
+/// 让 v0.1.13 及以前升级上来的用户仍能看到当日历史日志。
 fn read_logs() -> Vec<LogEntry> {
     let mut out = Vec::new();
 
-    // 优先读 UI 自身日志。
-    let ui_log = std::env::temp_dir().join("RouteTool").join("bypass-ui.log");
-    if ui_log.exists() {
-        read_log_file(&ui_log, &mut out);
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    // UI 日志。
+    let ui_dir = std::env::temp_dir().join("RouteTool");
+    for prefix in [UI_LOG_PREFIX_NEW, UI_LOG_PREFIX_OLD] {
+        let p = ui_dir.join(format!("{prefix}.log.{today}"));
+        if p.exists() {
+            read_log_file(&p, &mut out);
+        }
     }
 
-    // 再读核心日志（按日期）。
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let core_log = std::path::Path::new(CORE_LOG_DIR).join(format!("bypass-core.log.{}", today));
-    if core_log.exists() {
-        read_log_file(&core_log, &mut out);
+    // 核心日志。
+    let core_dir = std::path::Path::new(CORE_LOG_DIR);
+    for prefix in [CORE_LOG_PREFIX_NEW, CORE_LOG_PREFIX_OLD] {
+        let p = core_dir.join(format!("{prefix}.log.{today}"));
+        if p.exists() {
+            read_log_file(&p, &mut out);
+        }
     }
 
     // 合并后按时间排序并截断。
@@ -270,6 +289,28 @@ fn read_logs() -> Vec<LogEntry> {
         .into_iter()
         .rev()
         .collect()
+}
+
+/// 把 tracing 默认格式的 RFC3339 时间戳（带 Z 后缀）格式化为本地时区的 HH:MM:SS。
+///
+/// 例如：`2026-09-09T08:40:22.123456Z` 在东八区下显示为 `16:40:22`。
+/// 解析失败时回退到字符串切片截取（兼容异常格式）。
+fn format_local_hms(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|_| {
+            raw.split_once('T')
+                .map(|(_, t)| {
+                    t.split_once('.')
+                        .map(|(h, _)| h.to_string())
+                        .unwrap_or(t.to_string())
+                })
+                .unwrap_or_else(|| raw.to_string())
+        })
 }
 
 /// 读取单个日志文件，按 tracing 默认格式解析：
@@ -289,15 +330,8 @@ fn read_log_file(path: &std::path::Path, out: &mut Vec<LogEntry>) {
         let level_raw = parts.next().unwrap_or("");
         let rest = parts.next().unwrap_or(line);
 
-        // 时间取 HH:MM:SS
-        let time = time_raw
-            .split_once('T')
-            .map(|(_, t)| {
-                t.split_once('.')
-                    .map(|(h, _)| h.to_string())
-                    .unwrap_or(t.to_string())
-            })
-            .unwrap_or_else(|| time_raw.to_string());
+        // 本地时区显示（用户的实际视角），不再是 UTC 字符串切片。
+        let time = format_local_hms(time_raw);
 
         let level = level_raw.trim().to_uppercase();
         // 去掉目标前缀（如 module::path:）
@@ -318,8 +352,19 @@ fn read_log_file(path: &std::path::Path, out: &mut Vec<LogEntry>) {
 fn init_logging() {
     let dir = std::env::temp_dir().join("RouteTool");
     let _ = std::fs::create_dir_all(&dir);
-    core_lib::log_prune::prune_old_logs(&dir, "bypass-ui.log", core_lib::log_prune::LOG_RETENTION);
-    let appender = tracing_appender::rolling::daily(dir, "bypass-ui.log");
+    // 同时清理旧名（v0.1.13 及以前的 `bypass-ui.log.YYYY-MM-DD`），
+    // 不让两条命名各占一份当天滚动文件。
+    core_lib::log_prune::prune_old_logs(
+        &dir,
+        UI_LOG_PREFIX_OLD,
+        core_lib::log_prune::LOG_RETENTION,
+    );
+    core_lib::log_prune::prune_old_logs(
+        &dir,
+        UI_LOG_PREFIX_NEW,
+        core_lib::log_prune::LOG_RETENTION,
+    );
+    let appender = tracing_appender::rolling::daily(dir, format!("{UI_LOG_PREFIX_NEW}.log"));
     let (writer, _guard) = tracing_appender::non_blocking(appender);
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -424,6 +469,7 @@ fn main() -> anyhow::Result<()> {
                         &adapters.unwrap_or_default(),
                         &adapter_id_for_info,
                     );
+                    app.set_service_status_text("服务运行中".into());
                 }
             });
             let _ = cfg_id;
@@ -521,57 +567,37 @@ fn main() -> anyhow::Result<()> {
                     let mut st = state.lock().await;
                     st.config = cfg;
                 }
+                let succeeded = result.is_ok();
                 if let Err(e) = result {
+                    // 提前 clone：move 闭包要独占，避免后续 is_ok 分支再用到 app_weak 时已被移动。
+                    let app_weak_err = app_weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(app) = app_weak.upgrade() {
+                        if let Some(app) = app_weak_err.upgrade() {
                             app.set_config_error(e.into());
                         }
                     });
+                }
+                // 状态切换成功后，主动拉一次最新网卡列表回填首页。
+                // 直改模式下启用 → 网关被 netsh 重写为旁路由 IP，即时回填才有意义；
+                // 路由叠加则数据无变化，重复一次也无副作用。
+                if succeeded {
+                    refresh_adapters(state.clone(), app_weak.clone()).await;
                 }
             });
         });
     }
 
-    // ---- UI 回调：测试连通性 ----
+    // ---- UI 回调：刷新网卡（首页进入/窗口显示时触发） ----
     {
         let state = state.clone();
         let app_weak = app.as_weak();
         let rt = rt.clone();
-        app.on_test_connectivity(move || {
+        app.on_refresh_adapters(move || {
             let state = state.clone();
             let app_weak = app_weak.clone();
-            let ip_text = app_weak
-                .upgrade()
-                .map(|a| a.get_bypass_ip_text().to_string())
-                .unwrap_or_default();
-            let ip: std::net::IpAddr = match ip_text.parse() {
-                Ok(ip) => ip,
-                Err(_) => {
-                    if let Some(app) = app_weak.upgrade() {
-                        app.set_test_result("IP 地址无效".into());
-                    }
-                    return;
-                }
-            };
             let rt = rt.clone();
             rt.spawn(async move {
-                let result = {
-                    let mut st = state.lock().await;
-                    match st.client.as_mut() {
-                        Some(c) => c.test_connectivity(ip).await,
-                        None => Err("未连接到核心服务".to_string()),
-                    }
-                };
-                let msg = match result {
-                    Ok(true) => "连通性 OK：旁路由可达".to_string(),
-                    Ok(false) => "无法连通：请检查旁路由设备".to_string(),
-                    Err(e) => format!("测试失败: {e}"),
-                };
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(app) = app_weak.upgrade() {
-                        app.set_test_result(msg.into());
-                    }
-                });
+                refresh_adapters(state.clone(), app_weak.clone()).await;
             });
         });
     }
@@ -697,7 +723,7 @@ fn main() -> anyhow::Result<()> {
             .spawn();
     });
 
-    // ---- 状态轮询定时器（1s）：刷新状态文本 + 托盘 + 日志页 ----
+    // ---- 状态轮询定时器（1s）：刷新状态文本 + 托盘 + 日志页 + 服务指示 ----
     {
         let state = state.clone();
         let app_weak = app.as_weak();
@@ -722,6 +748,22 @@ fn main() -> anyhow::Result<()> {
                             None => None,
                         }
                     };
+
+                    // 同步服务指示文字：与 IPC 客户端存活状态对齐。
+                    {
+                        let st = state.lock().await;
+                        let txt = if st.client.is_some() {
+                            "服务运行中"
+                        } else {
+                            "服务断开"
+                        };
+                        let app_weak2 = app_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(app) = app_weak2.upgrade() {
+                                app.set_service_status_text(txt.into());
+                            }
+                        });
+                    }
 
                     if snapshot.is_none() {
                         let (reconnected, status_ok, cfg_ok, adapters_ok) = {

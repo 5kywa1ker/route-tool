@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# 时区固定为东八区：日志与 GitHub Release notes 中的时间戳与本机一致，
+# 避免工作流执行机器（UTC）和用户视角（中国大陆使用者）对不上。
+env:
+  TZ: Asia/Shanghai
+
 jobs:
   build:
     runs-on: windows-latest
@@ -81,8 +86,8 @@ jobs:
         with:
           name: RouteTool-${{ steps.version.outputs.version }}
           path: |
-            target/x86_64-pc-windows-msvc/release/bypass-core.exe
-            target/x86_64-pc-windows-msvc/release/bypass-ui.exe
+            target/x86_64-pc-windows-msvc/release/route-tool-core.exe
+            target/x86_64-pc-windows-msvc/release/route-tool-ui.exe
             installer/Output/RouteTool-Setup-*.exe
 
       - name: Create GitHub Release
