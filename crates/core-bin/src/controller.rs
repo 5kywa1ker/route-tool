@@ -191,8 +191,21 @@ impl Controller {
                     }
                     None => {
                         warn!("reconcile: expected bypass routes missing; re-adding");
-                        let h = self.overlay.enable(&target).await?;
-                        *self.handle.lock().await = Some(h);
+                        match self.overlay.enable(&target).await {
+                            Ok(h) => {
+                                *self.handle.lock().await = Some(h);
+                            }
+                            // 开机早期（SCM 自动启动服务时）目标网卡可能尚未就绪，
+                            // 添加路由会失败。这里不能让一致性校验整体失败：
+                            // 保持"预期启用"，仍要拉起健康检测——探测失败会按阈值
+                            // 自动回退到真实直连态，UI/托盘随之显示真实状态；
+                            // 条件具备后（auto_reenable 开启时）还能自动恢复。
+                            Err(e) => {
+                                warn!("reconcile: 重建叠加路由失败（网络可能未就绪）: {e}");
+                                self.start_health_monitor(&cfg, target).await;
+                                return Ok(());
+                            }
+                        }
                     }
                 }
                 self.mark_enabled(mode).await?;

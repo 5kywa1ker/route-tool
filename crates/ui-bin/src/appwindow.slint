@@ -13,7 +13,7 @@
 //   - 界面图标：Fluent UI System Icons（MIT License）24px regular 变体，
 //     经 Iconify API 获取后以 Path commands 内嵌矢量渲染，任意缩放下保持锐利。
 
-import { Button, ComboBox, LineEdit, SpinBox, CheckBox, ScrollView } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, CheckBox, ScrollView } from "std-widgets.slint";
 
 // 全局主题色
 export global Theme {
@@ -129,6 +129,125 @@ component FormRow {
     }
 }
 
+// NumberBox 的上/下步进小按钮（三角形图标 + 悬浮/按压反馈）。
+component NumberStepButton {
+    in property <bool> up;
+    callback clicked();
+
+    width: 22px;
+    Rectangle {
+        ta := TouchArea {
+            clicked => { root.clicked(); }
+        }
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 10px;
+                height: 10px;
+                fill: ta.has-hover ? Theme.accent-blue : Theme.text-secondary;
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: root.up ? "M6 15l6-6 6 6z" : "M6 9l6 6 6-6z";
+            }
+        }
+    }
+}
+
+// 数字输入框：替代 std-widgets SpinBox。
+// std SpinBox 的内部 TouchArea 对滚轮无条件 accept，指针悬浮上去滚一下
+// 配置就变了。这里自绘等价控件（外观对齐 LineEdit / SpinBox）：
+//   - 仅当文本框获得焦点（编辑状态）时响应滚轮增减；
+//   - 未聚焦的滚轮事件 reject，交给外层 ScrollView 正常滚动页面。
+component NumberBox {
+    in property <int> minimum: 1;
+    in property <int> maximum: 100;
+    in-out property <int> value;
+    out property <bool> has-focus <=> ti.has-focus;
+
+    min-height: 36px;
+    horizontal-stretch: 1;
+
+    function apply-new-value(v: int) {
+        if root.value == v || (v >= root.minimum && v <= root.maximum) {
+            root.value = v;
+        }
+    }
+
+    // value 被步进/滚轮修改后回写文本框。
+    changed value => {
+        ti.text = root.value;
+    }
+
+    Rectangle {
+        border-radius: 4px;
+        background: #ffffff;
+        border-width: 1px;
+        border-color: ti.has-focus ? Theme.accent-blue : Theme.border-gray;
+
+        // 声明在 TextInput 之前（z 序在下）：点击穿透给 TextInput，
+        // 滚轮事件在 TextInput 不处理时落到这里，按聚焦状态决定 accept/reject。
+        wheel := TouchArea {
+            scroll-event(ev) => {
+                if !ti.has-focus {
+                    return reject;
+                }
+                if ev.delta-y > 0 {
+                    root.apply-new-value(root.value + 1);
+                    return accept;
+                }
+                if ev.delta-y < 0 {
+                    root.apply-new-value(root.value - 1);
+                    return accept;
+                }
+                reject
+            }
+        }
+
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 4px;
+            padding-top: 4px;
+            padding-bottom: 4px;
+            spacing: 2px;
+
+            Rectangle {
+                clip: true;
+                horizontal-stretch: 1;
+                ti := TextInput {
+                    vertical-alignment: center;
+                    text: root.value;
+                    color: Theme.text-primary;
+                    font-size: Typography.body-size;
+
+                    accepted => {
+                        if !self.text.is-float() {
+                            ti.text = root.value;
+                        }
+                    }
+                    edited => {
+                        if self.text.is-float() && self.text.to-float() != root.value {
+                            root.apply-new-value(self.text.to-float());
+                        } else if !self.text.is-float() && self.text != "" {
+                            ti.text = root.value;
+                        }
+                    }
+                }
+            }
+
+            NumberStepButton {
+                up: true;
+                clicked => { root.apply-new-value(root.value + 1); }
+            }
+            NumberStepButton {
+                up: false;
+                clicked => { root.apply-new-value(root.value - 1); }
+            }
+        }
+    }
+}
+
 component StatItem {
     in property <string> label;
     in property <string> value;
@@ -166,21 +285,61 @@ component StatItem {
     }
 }
 
-component InfoRow {
-    in property <string> label;
+// 首页卡片「key 左 / value 右」行。
+//   - key 固有宽度靠左；value 区 horizontal-stretch: 1 吃掉剩余宽度并右对齐
+//     （HorizontalLayout 里 Text 默认 stretch=1，key 必须显式置 0，
+//     否则 key 的框撑满整行把 value 顶到行尾——v0.1.17 二次踩坑）。
+//   - value 超宽时省略号截断，鼠标悬浮在该行弹出完整内容浮层
+//     （浮层相对 value 区定位，父级 Rectangle 默认不裁剪，可溢出卡片显示）。
+component KeyValueRow {
+    in property <string> key;
     in property <string> value;
+    in property <color> value-color: Theme.text-primary;
 
-    VerticalLayout {
-        spacing: 3px;
+    HorizontalLayout {
+        spacing: 6px;
         Text {
-            text: root.label;
+            text: root.key;
             font-size: Typography.label-size;
             color: Theme.text-secondary;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
         }
-        Text {
-            text: root.value;
-            font-size: Typography.body-size;
-            color: Theme.text-primary;
+        Rectangle {
+            height: 20px;
+            horizontal-stretch: 1;
+            hover := TouchArea { }
+            Text {
+                width: 100%;
+                text: root.value;
+                font-size: Typography.label-size;
+                color: root.value-color;
+                overflow: elide;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+            if hover.has-hover && root.value != "": Rectangle {
+                x: parent.width - self.width;
+                y: parent.height + 6px;
+                width: 340px;
+                background: #ffffff;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: Theme.border-gray;
+                drop-shadow-offset-x: 0;
+                drop-shadow-offset-y: 2px;
+                drop-shadow-blur: 8px;
+                drop-shadow-color: #22000000;
+                VerticalLayout {
+                    padding: 8px;
+                    Text {
+                        text: root.value;
+                        font-size: Typography.caption-size;
+                        color: Theme.text-primary;
+                        wrap: word-wrap;
+                    }
+                }
+            }
         }
     }
 }
@@ -250,32 +409,6 @@ component ModeCard {
         }
         TouchArea {
             clicked => { root.clicked(); }
-        }
-    }
-}
-
-// 「旁路由 IP」等 key-value 行。
-// Slint 的 HorizontalLayout 里 Text 默认 horizontal-stretch=1：若只固定 value 的
-// stretch，key 的框会被撑满整行，把 value 顶到行尾。key/value 都设
-// horizontal-stretch: 0，两个 Text 都保持固有宽度并紧贴行首排列。
-component KeyValueRow {
-    in property <string> key;
-    in property <string> value;
-    in property <color> value-color: Theme.text-primary;
-
-    HorizontalLayout {
-        spacing: 6px;
-        Text {
-            text: root.key;
-            font-size: Typography.label-size;
-            color: Theme.text-secondary;
-            horizontal-stretch: 0;
-        }
-        Text {
-            text: root.value;
-            font-size: Typography.label-size;
-            color: root.value-color;
-            horizontal-stretch: 0;
         }
     }
 }
@@ -388,13 +521,10 @@ component AdapterReconfigCard {
                 }
             }
             KeyValueRow { key: "网卡"; value: root.adapter-name; }
-            GridLayout {
-                spacing: 14px;
-                InfoRow { label: "网卡 IP"; value: root.ip; col: 0; row: 0; }
-                InfoRow { label: "子网掩码"; value: root.mask; col: 1; row: 0; }
-                InfoRow { label: "网关"; value: root.gateway; col: 0; row: 1; }
-                InfoRow { label: "DNS"; value: root.dns; col: 1; row: 1; }
-            }
+            KeyValueRow { key: "网卡 IP"; value: root.ip; }
+            KeyValueRow { key: "子网掩码"; value: root.mask; }
+            KeyValueRow { key: "网关"; value: root.gateway; }
+            KeyValueRow { key: "DNS"; value: root.dns; }
         }
     }
 }
@@ -407,6 +537,10 @@ component SidebarItem {
 
     Rectangle {
         height: 34px;
+        // VerticalLayout 里元素默认 vertical-stretch=1，会把 34px 的菜单项
+        // 拉伸铺满整栏高度（表现为菜单上下分散）。固定为 0，剩余空间交给
+        // 主布局里的弹性填充块，菜单项从上到下紧凑排列。
+        vertical-stretch: 0;
         background: root.selected ? #e8f4fd : transparent;
         border-radius: 6px;
         HorizontalLayout {
@@ -464,15 +598,21 @@ component ToolButton {
             padding-right: 12px;
             spacing: 6px;
             alignment: center;
-            if root.icon-data != "": Path {
-                width: 16px;
-                height: 16px;
-                fill: root.accent ? #ffffff : Theme.text-primary;
-                viewbox-x: 0;
-                viewbox-y: 0;
-                viewbox-width: 24;
-                viewbox-height: 24;
-                commands: root.icon-data;
+            // 图标上下居中：Rectangle/Path 不支持 vertical-alignment，
+            // 用 VerticalLayout 包一层让内层 alignment: center 生效，
+            // 否则 16px 图标在 32px 按钮里贴顶，与文字错位。
+            if root.icon-data != "": VerticalLayout {
+                alignment: center;
+                Path {
+                    width: 16px;
+                    height: 16px;
+                    fill: root.accent ? #ffffff : Theme.text-primary;
+                    viewbox-x: 0;
+                    viewbox-y: 0;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: root.icon-data;
+                }
             }
             Text {
                 text: root.text;
@@ -651,10 +791,12 @@ component ConfigPage {
     in-out property <int> failure-threshold;
     in-out property <bool> auto-reenable;
     in-out property <bool> notifications;
+    in-out property <bool> launch-at-startup;
     in property <string> config-error;
     callback adapter-changed(int);
     callback save-config();
     callback restore-default();
+    callback launch-at-startup-changed(bool);
 
     ScrollView {
         VerticalLayout {
@@ -775,19 +917,17 @@ component ConfigPage {
                     }
                     FormRow {
                         label: "检测间隔（秒）";
-                        SpinBox {
+                        NumberBox {
                             minimum: 1;
                             maximum: 60;
-                            min-height: 36px;
                             value <=> root.interval-secs;
                         }
                     }
                     FormRow {
                         label: "失败阈值";
-                        SpinBox {
+                        NumberBox {
                             minimum: 1;
                             maximum: 10;
-                            min-height: 36px;
                             value <=> root.failure-threshold;
                         }
                     }
@@ -798,6 +938,32 @@ component ConfigPage {
                     CheckBox {
                         text: "启用系统通知";
                         checked <=> root.notifications;
+                    }
+                }
+            }
+
+            // 开机自启是 UI 层设置（写 HKCU Run 键，注册表值带 --tray 参数），
+            // 不走核心服务配置。
+            Card {
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 10px;
+                    Text {
+                        text: "开机启动";
+                        font-size: Typography.heading-size;
+                        font-weight: 600;
+                        color: Theme.text-primary;
+                    }
+                    CheckBox {
+                        text: "开机自动启动（仅启动托盘图标，不打开窗口）";
+                        checked <=> root.launch-at-startup;
+                        toggled => { root.launch-at-startup-changed(self.checked); }
+                    }
+                    Text {
+                        text: "开机后 RouteTool 仅在系统托盘运行，双击托盘图标可打开设置窗口；核心服务会自动核实并恢复旁路由状态。";
+                        font-size: Typography.caption-size;
+                        color: Theme.text-tertiary;
+                        wrap: word-wrap;
                     }
                 }
             }
@@ -1072,6 +1238,7 @@ export component AppWindow inherits Window {
     in-out property <int> failure-threshold: 3;
     in-out property <bool> auto-reenable: false;
     in-out property <bool> notifications: true;
+    in-out property <bool> launch-at-startup: false;
     in property <string> config-error: "";
 
     in property <[LogEntry]> log-entries: [];
@@ -1084,6 +1251,7 @@ export component AppWindow inherits Window {
     callback restore-default();
     callback check-update();
     callback refresh-logs();
+    callback launch-at-startup-changed(bool);
     // 主动触发「拉取最新网卡列表 + 刷新首页下方卡片」
     callback refresh-adapters();
 
@@ -1158,9 +1326,16 @@ export component AppWindow inherits Window {
                     clicked => { root.current-page = 3; }
                 }
 
+                // 弹性填充：吸收剩余高度，让菜单项贴顶、底部状态块贴底。
+                Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 0;
+                }
+
                 VerticalLayout {
                     alignment: end;
                     spacing: 4px;
+                    vertical-stretch: 0;
                     HorizontalLayout {
                         spacing: 4px;
                         alignment: start;
@@ -1221,10 +1396,12 @@ export component AppWindow inherits Window {
                     failure-threshold <=> root.failure-threshold;
                     auto-reenable <=> root.auto-reenable;
                     notifications <=> root.notifications;
+                    launch-at-startup <=> root.launch-at-startup;
                     config-error: root.config-error;
                     adapter-changed(index) => { root.adapter-changed(index); }
                     save-config => { root.save-config(); }
                     restore-default => { root.restore-default(); }
+                    launch-at-startup-changed(enabled) => { root.launch-at-startup-changed(enabled); }
                 }
 
                 if root.current-page == 2: LogsPage {

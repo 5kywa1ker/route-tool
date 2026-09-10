@@ -4,6 +4,7 @@
 // debug 构建保留控制台，方便直接看到 panic / 日志输出。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
 mod ipc_client;
 mod notify;
 mod single_instance;
@@ -403,6 +404,11 @@ fn init_logging() {
 fn main() -> anyhow::Result<()> {
     init_logging();
 
+    // 开机自启经 Run 键带 --tray 启动：只显示托盘图标，不弹设置窗口。
+    let start_minimized = std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--tray" || arg == "--minimized");
+
     let _single_instance = match single_instance::acquire_or_notify()? {
         Some(guard) => guard,
         None => return Ok(()),
@@ -427,6 +433,17 @@ fn main() -> anyhow::Result<()> {
     let _ = tray::SHARED_TRAY.set(tray::StaticTray(tray));
 
     app.set_version_text(VERSION.into());
+
+    // ---- 开机自启：读取/迁移设置并回显勾选框 ----
+    // 旧版安装包写的 Run 键值无 --tray（开机弹窗口），这里自愈为托盘启动形式；
+    // 无设置文件但注册表已有值时视为用户曾勾选自启，继承为开启。
+    match autostart::init_and_migrate() {
+        Ok(enabled) => app.set_launch_at_startup(enabled),
+        Err(e) => {
+            tracing::error!("初始化开机自启设置失败: {e:#}");
+            app.set_launch_at_startup(false);
+        }
+    }
 
     // ---- 连接核心：串行完成 连接 → 拉配置 → 拉网卡列表，一次性同步 UI ----
     {
@@ -718,6 +735,22 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ---- UI 回调：开机自启勾选框（HKCU Run 键 + UI 设置文件） ----
+    {
+        let app_weak = app.as_weak();
+        app.on_launch_at_startup_changed(move |enabled| {
+            if let Err(e) = autostart::set_enabled(enabled) {
+                tracing::error!("设置开机自启失败: {e:#}");
+                let app_weak = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = app_weak.upgrade() {
+                        app.set_config_error(format!("设置开机自启失败: {e}").into());
+                    }
+                });
+            }
+        });
+    }
+
     // ---- UI 回调：打开日志目录 ----
     app.on_open_logs(|| {
         let dir = CORE_LOG_DIR;
@@ -967,7 +1000,13 @@ fn main() -> anyhow::Result<()> {
         std::mem::forget(timer);
     }
 
-    app.show()?;
+    // 托盘模式（开机自启 --tray）下窗口保持隐藏，仅托盘图标驻留；
+    // 事件循环与状态轮询照常运行，双击/菜单「打开设置」仍可唤起窗口。
+    if start_minimized {
+        tracing::info!("托盘模式启动（--tray），设置窗口保持隐藏");
+    } else {
+        app.show()?;
+    }
     slint::run_event_loop_until_quit()?;
     std::process::exit(0);
 }

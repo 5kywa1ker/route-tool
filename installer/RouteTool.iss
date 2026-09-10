@@ -64,8 +64,9 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Tasks]
+; 开机自启改由应用内配置页管理（HKCU Run 键，值带 --tray 仅启动托盘），
+; 不再在安装包里提供任务选项；旧安装写的 Run 键由 UI 启动时自愈/迁移。
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "autostart"; Description: "开机自动启动 route-tool-ui 托盘"; GroupDescription: "其他选项："; Flags: unchecked
 
 [Run]
 ; 清理旧版本遗留服务（v0.1.3 及之前服务名为 BypassToolCore）：
@@ -94,13 +95,12 @@ Filename: "taskkill"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden; Ru
 Filename: "sc"; Parameters: "stop {#ServiceName}"; Flags: runhidden; RunOnceId: "StopSvc"
 Filename: "taskkill"; Parameters: "/F /IM {#CoreExeName}"; Flags: runhidden; RunOnceId: "KillCore"
 Filename: "{app}\{#CoreExeName}"; Parameters: "--uninstall-service"; Flags: runhidden; RunOnceId: "DelSvc"
+; 清理应用配置页写入的开机自启 Run 键值（/f 忽略不存在的情况）。
+Filename: "reg"; Parameters: "delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v RouteToolUI /f"; Flags: runhidden; RunOnceId: "DelRunKey"
 
 [UninstallDelete]
 ; 卸载时不清理 %ProgramData%\RouteTool（保留用户配置与日志）
-
-[Registry]
-; 开机自启 route-tool-ui（HKEY_CURRENT_USER，卸载时删除）
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "RouteToolUI"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
+; 开机自启 Run 键值在 [UninstallRun] 里用 reg delete 清理。
 
 [Code]
 // 检测服务是否已安装（用于幂等升级安装）。
