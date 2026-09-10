@@ -89,6 +89,36 @@ export global Typography {
     out property <float> caption-num: 12;
 }
 
+// 浮层（Tooltip / 悬浮详情）样式 Token。
+//
+// 参考 Element UI 的 message-tooltip：深灰底 + 纯白字 + 6px 圆角 + 轻投影。
+// 不用纯黑，深灰在浅色界面上层次更柔和，也是 Element UI 的取值（#303133）。
+// 跟随鼠标的浮层统一从这里取，避免各处硬编码导致深浅不一。
+export global TooltipStyle {
+    out property <color> background: #303133;
+    out property <color> text-color: #ffffff;
+    out property <color> border-color: #4c4d4f;
+    out property <length> radius: 6px;
+    out property <length> max-width: 300px;
+    out property <length> arrow-size: 6px;
+    // 鼠标与浮层之间的间距，避免浮层贴着光标导致遮挡。
+    out property <length> offset: 14px;
+}
+
+// 悬浮浮层的共享状态（单例浮层用）。
+//
+// 为什么是全局单例而不是每行各挂一个浮层：
+//   浮层写在某个行元素里时，绘制顺序在「后面的行」之下——鼠标悬浮上一行、
+//   浮层伸到下一行区域时会被下一行的白底盖住。提升到页面级、声明在所有
+//   页面内容之后，保证浮层永远画在最上层。
+// mouse-* 存的是鼠标的窗口坐标（原始值），由浮层实例处再做局部换算与边界夹取。
+export global TooltipState {
+    in-out property <bool> visible: false;
+    in-out property <string> text;
+    in-out property <length> mouse-wx;
+    in-out property <length> mouse-wy;
+}
+
 // 间距 / 尺寸 / 圆角 Token（规范第 78~81 节）。
 // 组件只从这里取，避免散落魔法数字导致间距不一致。
 export global Metrics {
@@ -171,36 +201,72 @@ component Card {
         drop-shadow-offset-y: 1px;
         drop-shadow-blur: 4px;
         drop-shadow-color: #00000006;
+        // 卡片必须横向铺满所在页面；否则宽度只按内容固有宽度算，
+        // 页面变宽时卡片不会跟着变宽，内容还会被裁切。
+        //
+        // 这里显式给出 width: 100%，让 @children（CardBody 等）拿到确定的可用宽度：
+        // 若宽度不确定，内部同时含水平布局与折行文本的卡片会出现
+        // 「高度算得对但文字完全不绘制」的现象（SectionTitle 空白）。
+        width: 100%;
+        horizontal-stretch: 1;
         @children
     }
 }
 
 // 卡片内标准内边距容器（规范第 10 节 Card Padding 16px）。
+//
+// 同样必须是 Rectangle 根：裸 VerticalLayout 作根会引入
+// layoutinfo <-> 分配宽高 的循环依赖（见 SectionTitle 注释）。
 component CardBody {
-    VerticalLayout {
-        padding: Metrics.card-padding;
-        spacing: Metrics.spacing-md;
-        @children
+    width: 100%;
+    horizontal-stretch: 1;
+    Rectangle {
+        VerticalLayout {
+            padding: Metrics.card-padding;
+            spacing: Metrics.spacing-md;
+            // 必须横向铺满 Card；否则内部 FormRow / 输入框只按固有宽度摆放，
+            // 表现为输入框"消失"或内容被裁切。
+            horizontal-stretch: 1;
+            @children
+        }
     }
 }
 
 // 卡片/区块标题（规范第 3 节 Heading 16px/600）。
+//
+// 根元素必须是 Rectangle（而不是裸 VerticalLayout）：
+// 以布局元素为根的组件，其 preferred-width/height 由自身 layoutinfo 推出，
+// 而 layoutinfo 又依赖被分配的宽高，形成
+//   text -> layoutinfo-h -> preferred-width -> width -> layoutinfo-h
+// 的循环依赖。宽度无法求解时 Slint 退化处理，结果是「高度按预期预留、
+// 文字却完全不绘制」——表现为区块标题位置一片空白。
+// 换成 Rectangle 根后宽度自上而下确定，循环被打断。
+//
+// 宽度用 min-width: 0 + horizontal-stretch: 1（而不是 width: 100%）：
+// 这样既能在 VerticalLayout 里铺满，又能在 HorizontalLayout 里与
+// 右侧操作链接共存，不会把对方顶出可视区。
 component SectionTitle {
     in property <string> text;
     in property <string> hint;
-    VerticalLayout {
-        spacing: Metrics.spacing-xs;
-        Text {
-            text: root.text;
-            font-size: Typography.heading-size;
-            font-weight: 600;
-            color: Theme.text-primary;
-        }
-        if root.hint != "": Text {
-            text: root.hint;
-            font-size: Typography.caption-size;
-            color: Theme.text-tertiary;
-            wrap: word-wrap;
+    min-width: 0px;
+    horizontal-stretch: 1;
+    Rectangle {
+        VerticalLayout {
+            spacing: Metrics.spacing-xs;
+            horizontal-stretch: 1;
+            Text {
+                text: root.text;
+                font-size: Typography.heading-size;
+                font-weight: 600;
+                color: Theme.text-primary;
+            }
+            if root.hint != "": Text {
+                text: root.hint;
+                font-size: Typography.caption-size;
+                color: Theme.text-tertiary;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
         }
     }
 }
@@ -211,6 +277,9 @@ component PageHeader {
     in property <string> subtitle;
     VerticalLayout {
         spacing: Metrics.spacing-xs;
+        // 页头铺满内容区宽度：副标题是 word-wrap，需要已知的可用宽度才能正确折行；
+        // 不拉伸会按整句固有宽度参与布局，把内容区顶宽并导致右侧裁切。
+        horizontal-stretch: 1;
         Text {
             text: root.title;
             font-size: Typography.title-size;
@@ -222,6 +291,7 @@ component PageHeader {
             font-size: Typography.caption-size;
             color: Theme.text-secondary;
             wrap: word-wrap;
+            horizontal-stretch: 1;
         }
     }
 }
@@ -291,10 +361,12 @@ component InlineBanner {
         border-radius: Metrics.radius-md;
         border-width: 1px;
         border-color: root.tone;
+        horizontal-stretch: 1;
         HorizontalLayout {
             padding: Metrics.spacing-md;
             spacing: Metrics.spacing-sm;
             alignment: start;
+            horizontal-stretch: 1;
             VerticalLayout {
                 alignment: center;
                 Path {
@@ -346,6 +418,7 @@ component EmptyState {
     VerticalLayout {
         spacing: Metrics.spacing-sm;
         alignment: center;
+        horizontal-stretch: 1;
         VerticalLayout {
             alignment: center;
             Path {
@@ -426,28 +499,47 @@ component FormRow {
     in property <string> error;
     in property <string> suffix;
 
-    VerticalLayout {
-        spacing: Metrics.spacing-md;
-
+    // Rectangle 根（原因见 SectionTitle 注释）。
+    // 宽度用 min-width: 0 + horizontal-stretch: 1，而不是 width: 100%：
+    // 后者在 HorizontalLayout 里会强占整行宽度，把同排的兄弟元素挤出可视区
+    // （如「检测间隔 / 失败阈值」两列、标题行右侧的操作链接）。
+    min-width: 0px;
+    horizontal-stretch: 1;
+    Rectangle {
+        min-width: 0px;
         VerticalLayout {
-            spacing: 6px;
+            spacing: Metrics.spacing-md;
+            // 表单行铺满卡片宽度：不拉伸会按 Label/Input 的固有宽度参与布局，
+            // 输入框不会随窗口变宽，长描述也无法按可用宽度折行。
+            horizontal-stretch: 1;
+
+            VerticalLayout {
+                spacing: 6px;
+                horizontal-stretch: 1;
 
             // Label 行：字段名 + 可选的短后缀（如「（秒）」单位）。
+            //
+            // 关键：Label 的 Text 不要用 wrap / overflow: elide。
+            // 这两种模式都需要先知道可用宽度才能算高度，而它处在一个
+            // 「由父级自上而下决定宽度」的拉伸布局里，高度计算阶段宽度尚未确定，
+            // 结果 Text 上报 0 高，整个 label 行被压扁（表现为只露出字形顶部一两个像素）。
+            // 字段名是短文本，按自然宽度单行显示即可。
             HorizontalLayout {
                 spacing: Metrics.spacing-xs;
+                // 左对齐：让单位后缀紧跟字段名，不被 HorizontalLayout
+                // 默认的 stretch 分布顶到整行最右侧。
+                alignment: start;
+                horizontal-stretch: 1;
                 Text {
                     text: root.label;
                     font-size: Typography.label-size;
                     color: root.error != "" ? Theme.error : Theme.text-secondary;
-                    wrap: word-wrap;
-                    horizontal-stretch: 1;
                 }
                 if root.suffix != "": Text {
                     text: root.suffix;
                     font-size: Typography.caption-size;
                     color: Theme.text-tertiary;
                     vertical-alignment: center;
-                    horizontal-stretch: 0;
                 }
             }
 
@@ -459,6 +551,7 @@ component FormRow {
         if root.error != "": HorizontalLayout {
             spacing: Metrics.spacing-xs;
             alignment: start;
+            horizontal-stretch: 1;
             VerticalLayout {
                 alignment: center;
                 Path {
@@ -480,11 +573,21 @@ component FormRow {
                 horizontal-stretch: 1;
             }
         }
-        if root.error == "" && root.description != "": Text {
-            text: root.description;
-            font-size: Typography.caption-size;
-            color: Theme.text-tertiary;
-            wrap: word-wrap;
+        if root.error == "" && root.description != "": HorizontalLayout {
+            horizontal-stretch: 1;
+            // 折行文本外包一层 HorizontalLayout：
+            // 直接作为 VerticalLayout 子项的 wrap: word-wrap Text 会形成
+            // 「高度 ← 宽度 ← 布局宽度 ← 高度」的循环依赖，Slint 取不到稳定高度，
+            // 会把本行压扁并与相邻行重叠。放进 HorizontalLayout 后，宽度先被
+            // 自上而下确定，再算高度，结果稳定。
+            Text {
+                text: root.description;
+                font-size: Typography.caption-size;
+                color: Theme.text-tertiary;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+        }
         }
     }
 }
@@ -502,6 +605,9 @@ component TextField {
     in property <bool> enabled: true;
     callback edited(string);
 
+    // 组件根就是外壳矩形。高度由 Metrics.control-std 唯一决定，
+    // 不依赖内部 input（避免相互依赖导致高度不稳定）。
+    height: Metrics.control-std;
     horizontal-stretch: 1;
 
     states [
@@ -528,17 +634,21 @@ component TextField {
 
         hover := TouchArea { }
 
-        input := LineEdit {
-            x: 0;
-            y: 0;
-            width: 100%;
-            height: 100%;
-            text <=> root.text;
-            placeholder-text: root.placeholder;
-            enabled: root.enabled;
-            font-size: Typography.body-size;
-            min-height: Metrics.control-std;
-            edited(text) => { root.edited(text); }
+        // 用内嵌布局承载 LineEdit，而不是绝对定位：
+        // 绝对定位（x/y/width/height: 100%）的元素不参与父级尺寸推导，
+        // 会让外壳的高度来源变得隐晦。放在布局里由布局统一决定内边距与撑满。
+        HorizontalLayout {
+            padding-left: 1px;
+            padding-right: 1px;
+            input := LineEdit {
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                text <=> root.text;
+                placeholder-text: root.placeholder;
+                enabled: root.enabled;
+                font-size: Typography.body-size;
+                edited(text) => { root.edited(text); }
+            }
         }
     }
 }
@@ -555,15 +665,18 @@ component NumberStepButton {
         }
         VerticalLayout {
             alignment: center;
+            // 三角形在 24 视窗里尽量占满（18×11），14px 渲染下可见箭头约
+            // 10.5×6.4px；旧版 12×6 三角形在 10px 渲染下只有约 5×2.5px，
+            // 小到难以辨认和点击。
             Path {
-                width: 10px;
-                height: 10px;
+                width: 14px;
+                height: 14px;
                 fill: ta.has-hover ? Theme.accent-blue : Theme.text-secondary;
                 viewbox-x: 0;
                 viewbox-y: 0;
                 viewbox-width: 24;
                 viewbox-height: 24;
-                commands: root.up ? "M6 15l6-6 6 6z" : "M6 9l6 6 6-6z";
+                commands: root.up ? "M12 5 L21 16 L3 16 Z" : "M12 19 L3 8 L21 8 Z";
             }
         }
     }
@@ -580,8 +693,13 @@ component NumberBox {
     in-out property <int> value;
     out property <bool> has-focus <=> ti.has-focus;
 
+    // 固定宽度：够放 3 位数字 + 两个步进按钮（规范第 71 节：数值类控件按
+    // 最大合理长度定宽）。以前是 horizontal-stretch: 1，在双列表单里会被
+    // 拉到半屏宽，与「3 位数字」的语义完全不匹配。
+    // 不再横向拉伸：宽度 = 10(左内边距) + 数字区(3 字符，由 min-width 兜底)
+    //        + 2 + 22 + 22(两个步进按钮) + 4(右内边距)
+    width: 96px;
     min-height: 36px;
-    horizontal-stretch: 1;
 
     function apply-new-value(v: int) {
         if root.value == v || (v >= root.minimum && v <= root.maximum) {
@@ -628,6 +746,7 @@ component NumberBox {
 
             Rectangle {
                 clip: true;
+                min-width: 3 * Typography.body-num * 1px + 10px;
                 horizontal-stretch: 1;
                 ti := TextInput {
                     vertical-alignment: center;
@@ -675,9 +794,11 @@ component StatItem {
         border-radius: Metrics.radius-md;
         border-width: 1px;
         border-color: Theme.border-gray;
+        horizontal-stretch: 1;
         VerticalLayout {
             padding: Metrics.spacing-md;
             spacing: Metrics.spacing-xs;
+            horizontal-stretch: 1;
             Text {
                 text: root.label;
                 font-size: Typography.label-size;
@@ -700,13 +821,82 @@ component StatItem {
     }
 }
 
+// 跟随鼠标的内联浮层（黑底白字 + 小箭头 + 复制操作）。
+//
+// 用于 KeyValueRow 的「完整值查看」：Element UI message-tooltip 风格。
+// 由单例浮层（AppWindow 内容区末尾）实例化，位置由 TooltipState 驱动。
+//
+//   - 根尺寸必须由内容显式推导（width/height 写在根上）：
+//     绝不能让内部元素反向绑定 parent 尺寸——根没有尺寸 + 内部依赖 parent
+//     会形成循环，Slint 求解失败时把根塌缩成极小尺寸。实测症状是
+//     「一条小黑条 + 白字溢出浮层外落在白底上不可见，只剩灰色『复制』」。
+//   - 换行文本的宽度上限用 max-width 表达（规范第 60 节）。
+component InlineTooltip {
+    in property <string> text;
+    // 箭头在浮层内的水平位置（由实例处按光标位置换算并夹取）。
+    in property <length> arrow-x: 12px;
+
+    // 箭头（指向光标的小三角）。
+    Path {
+        x: clamp(root.arrow-x, 2px,
+                 max(2px, parent.width - TooltipStyle.arrow-size * 2 - 2px));
+        y: 0px;
+        width: TooltipStyle.arrow-size * 2;
+        height: TooltipStyle.arrow-size;
+        fill: TooltipStyle.background;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M12 0 L24 24 L0 24 Z";
+    }
+
+    // 内容盒：从箭头下方开始。
+    box := Rectangle {
+        y: TooltipStyle.arrow-size;
+        width: parent.width;
+        height: parent.height - TooltipStyle.arrow-size;
+        background: TooltipStyle.background;
+        border-radius: TooltipStyle.radius;
+        drop-shadow-offset-x: 0;
+        drop-shadow-offset-y: 2px;
+        drop-shadow-blur: 6px;
+        drop-shadow-color: #33000000;
+
+        content := VerticalLayout {
+            width: parent.width;
+            height: parent.height;
+            padding: Metrics.spacing-sm;
+            text-el := Text {
+                text: root.text;
+                font-size: Typography.caption-size;
+                color: TooltipStyle.text-color;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    // 尺寸推导（放在子元素声明之后，仅引用其 preferred 值，无环：
+    //   根 width ← 文本固有宽度；根 height ← content.preferred-height（给定宽度）。
+    //   宽度全部自上而下确定，换行高度不参与宽度计算）。
+    width: min(TooltipStyle.max-width + 2 * Metrics.spacing-sm,
+               text-el.preferred-width + 2 * Metrics.spacing-sm);
+    height: TooltipStyle.arrow-size + content.preferred-height;
+}
+
 // 首页卡片「key 左 / value 右」行（规范第 43/44 节 Key-Value 展示）。
 //   - key 固有宽度靠左；value 区 horizontal-stretch: 1 吃掉剩余宽度并右对齐
 //     （HorizontalLayout 里 Text 默认 stretch=1，key 必须显式置 0，
 //     否则 key 的框撑满整行把 value 顶到行尾——v0.1.17 二次踩坑）。
 //   - 只读数据不用 Input 模拟（规范第 42 节），保持 Label + Value 结构。
-//   - value 超宽时省略号截断，鼠标悬浮弹出完整内容浮层 + 提供「复制」，
-//     保证「视觉可截断，但信息不可不可访问」（规范第 26/63 节）。
+//   - value 超宽时省略号截断，鼠标悬浮弹出完整内容浮层（Element UI 风格
+//     黑底白字、跟随鼠标），点击行复制完整值，保证「视觉可截断，
+//     但信息不可访问」（规范第 26/63 节）。
+//
+// 浮层形态：全局单例（TooltipState + 内容区末尾的 InlineTooltip 实例）。
+//   - 单例声明在所有页面内容之后 → 绘制顺序最高，不会被下一行白底盖住；
+//   - 每行只负责把悬浮状态与鼠标窗口坐标写入 TooltipState；
+//   - 位置换算/边界夹取集中在浮层实例处做一次。
 component KeyValueRow {
     in property <string> key;
     in property <string> value;
@@ -718,6 +908,7 @@ component KeyValueRow {
 
     HorizontalLayout {
         spacing: Metrics.spacing-sm;
+        horizontal-stretch: 1;
 
         Text {
             text: root.key;
@@ -731,71 +922,45 @@ component KeyValueRow {
             height: 20px;
             horizontal-stretch: 1;
 
-            hover := TouchArea { }
+            // 悬浮 → 显示全局单例浮层（内容区末尾统一渲染，见 TooltipState）；
+            // 点击 → 复制完整值（反馈：值文本短暂变为「已复制」）。
+            // changed/moved 里把鼠标窗口坐标写入 TooltipState：
+            //   TouchArea 的 mouse-x/y 是相对自身的偏移，必须加上
+            //   absolute-position 才是窗口坐标（Slint 官方 listview 同款换算）。
+            hover := TouchArea {
+                changed has-hover => {
+                    TooltipState.text = root.value;
+                    TooltipState.visible = self.has-hover && !root.is-empty;
+                    TooltipState.mouse-wx = self.absolute-position.x + self.mouse-x;
+                    TooltipState.mouse-wy = self.absolute-position.y + self.mouse-y;
+                }
+                moved => {
+                    TooltipState.mouse-wx = self.absolute-position.x + self.mouse-x;
+                    TooltipState.mouse-wy = self.absolute-position.y + self.mouse-y;
+                }
+                clicked => {
+                    root.copy-requested();
+                    root.copied = true;
+                    copy-timer.start();
+                }
+            }
 
             Text {
                 width: 100%;
-                text: root.display-value;
+                text: root.copied ? "已复制" : root.display-value;
                 font-size: Typography.label-size;
-                color: root.is-empty ? Theme.text-tertiary : root.value-color;
+                color: root.copied ? Theme.success
+                    : (root.is-empty ? Theme.text-tertiary : root.value-color);
                 overflow: elide;
                 horizontal-alignment: right;
                 vertical-alignment: center;
             }
-
-            // 悬浮浮层：完整值（可换行）+ 一键复制（规范第 63 节）。
-            // 父级 Rectangle 默认不裁剪，浮层可溢出卡片显示。
-            if hover.has-hover && !root.is-empty: Rectangle {
-                x: parent.width - self.width;
-                y: parent.height + 6px;
-                width: 300px;
-                background: #ffffff;
-                border-radius: Metrics.radius-sm;
-                border-width: 1px;
-                border-color: Theme.border-strong;
-                drop-shadow-offset-x: 0;
-                drop-shadow-offset-y: 2px;
-                drop-shadow-blur: 8px;
-                drop-shadow-color: #22000000;
-                VerticalLayout {
-                    padding: Metrics.spacing-md;
-                    spacing: Metrics.spacing-sm;
-                    Text {
-                        text: root.value;
-                        font-size: Typography.caption-size;
-                        color: Theme.text-primary;
-                        wrap: word-wrap;
-                    }
-                    HorizontalLayout {
-                        spacing: Metrics.spacing-xs;
-                        alignment: end;
-                        // 复制按钮：固定尺寸的点击热区，内部放文字，避免
-                        // TouchArea 尺寸绑定到自身子文本造成布局环。
-                        Rectangle {
-                            width: copy-text.width + Metrics.spacing-md;
-                            height: 20px;
-                            background: copy-ta.has-hover ? Theme.hover-fill : transparent;
-                            border-radius: 3px;
-
-                            copy-ta := TouchArea {
-                                clicked => {
-                                    copied = true;
-                                    copy-timer.start();
-                                }
-                            }
-                            copy-text := Text {
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                text: copied ? "已复制" : "复制";
-                                font-size: Typography.caption-size;
-                                color: copied ? Theme.success : Theme.accent-blue;
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
+
+    // 实际复制由页面侧（Rust）完成：UI 层拿到待复制文本后写系统剪贴板，
+    // 避免在 .slint 里依赖平台剪贴板 API。沿用既有 set_clipboard 回调。
+    callback copy-requested();
 
     property <bool> copied: false;
     // 复制反馈 1.5s 后复位（Timer 不能声明 id，用实例名引用）。
@@ -816,6 +981,14 @@ component ModeCard {
     in property <bool> selected;
     callback clicked();
 
+    // 卡片必须能被压缩到与兄弟卡相同的宽度：
+    // 根 Rectangle 若不给 min-width: 0，它的最小宽度会取内容固有宽度
+    // （标题单行 + 图标 + 内边距），于是「说明文字更长的那张卡」更宽，
+    // 两张卡在 HorizontalLayout 里就不等宽了。
+    // 置 0 后宽度完全由 horizontal-stretch 平分决定，两卡必然等宽。
+    min-width: 0px;
+    horizontal-stretch: 1;
+
     Rectangle {
         background: root.selected ? Theme.accent-soft
             : (ta.pressed ? Theme.pressed-fill
@@ -824,14 +997,19 @@ component ModeCard {
         border-width: root.selected ? 2px : 1px;
         border-color: root.selected ? Theme.accent-blue
             : (ta.has-hover ? Theme.border-strong : Theme.border-gray);
+        min-width: 0px;
 
         VerticalLayout {
             padding: Metrics.card-padding;
             spacing: Metrics.spacing-sm;
+            horizontal-stretch: 1;
 
+            // 标题行（图标 + 标题 + 选中标记）贴顶，说明文字紧随其后；
+            // 剩余高度由下方说明区吸收，保证两张卡视觉等高。
             HorizontalLayout {
                 spacing: Metrics.spacing-md;
                 alignment: start;
+                horizontal-stretch: 1;
 
                 Rectangle {
                     width: 32px;
@@ -885,6 +1063,7 @@ component ModeCard {
                 font-size: Typography.caption-size;
                 color: Theme.text-secondary;
                 wrap: word-wrap;
+                horizontal-stretch: 1;
             }
         }
 
@@ -899,18 +1078,22 @@ component ModeCard {
 component RouteOverlayCard {
     in property <string> bypass-ip;
     in property <string> adapter-name;
+    callback copy-value(string);
 
     Rectangle {
         background: Theme.subtle-fill;
         border-radius: Metrics.radius-md;
         border-width: 1px;
         border-color: Theme.border-gray;
+        horizontal-stretch: 1;
         VerticalLayout {
             padding: Metrics.spacing-md;
             spacing: Metrics.spacing-md;
+            horizontal-stretch: 1;
             HorizontalLayout {
                 spacing: Metrics.spacing-md;
                 alignment: start;
+                horizontal-stretch: 1;
                 Rectangle {
                     width: 32px;
                     height: 32px;
@@ -946,8 +1129,8 @@ component RouteOverlayCard {
                     }
                 }
             }
-            KeyValueRow { key: "网卡"; value: root.adapter-name; empty-text: "未选择"; }
-            KeyValueRow { key: "旁路由 IP"; value: root.bypass-ip; }
+            KeyValueRow { key: "网卡"; value: root.adapter-name; empty-text: "未选择"; copy-requested => { root.copy-value(root.adapter-name); } }
+            KeyValueRow { key: "旁路由 IP"; value: root.bypass-ip; copy-requested => { root.copy-value(root.bypass-ip); } }
         }
     }
 }
@@ -958,18 +1141,22 @@ component AdapterReconfigCard {
     in property <string> gateway;
     in property <string> dns;
     in property <string> adapter-name;
+    callback copy-value(string);
 
     Rectangle {
         background: Theme.subtle-fill;
         border-radius: Metrics.radius-md;
         border-width: 1px;
         border-color: Theme.border-gray;
+        horizontal-stretch: 1;
         VerticalLayout {
             padding: Metrics.spacing-md;
             spacing: Metrics.spacing-md;
+            horizontal-stretch: 1;
             HorizontalLayout {
                 spacing: Metrics.spacing-md;
                 alignment: start;
+                horizontal-stretch: 1;
                 Rectangle {
                     width: 32px;
                     height: 32px;
@@ -1005,11 +1192,11 @@ component AdapterReconfigCard {
                     }
                 }
             }
-            KeyValueRow { key: "网卡"; value: root.adapter-name; empty-text: "未选择"; }
-            KeyValueRow { key: "网卡 IP"; value: root.ip; empty-text: "未获取"; }
-            KeyValueRow { key: "子网掩码"; value: root.mask; empty-text: "未获取"; }
-            KeyValueRow { key: "网关"; value: root.gateway; empty-text: "未获取"; }
-            KeyValueRow { key: "DNS"; value: root.dns; empty-text: "未获取"; }
+            KeyValueRow { key: "网卡"; value: root.adapter-name; empty-text: "未选择"; copy-requested => { root.copy-value(root.adapter-name); } }
+            KeyValueRow { key: "网卡 IP"; value: root.ip; empty-text: "未获取"; copy-requested => { root.copy-value(root.ip); } }
+            KeyValueRow { key: "子网掩码"; value: root.mask; empty-text: "未获取"; copy-requested => { root.copy-value(root.mask); } }
+            KeyValueRow { key: "网关"; value: root.gateway; empty-text: "未获取"; copy-requested => { root.copy-value(root.gateway); } }
+            KeyValueRow { key: "DNS"; value: root.dns; empty-text: "未获取"; copy-requested => { root.copy-value(root.dns); } }
         }
     }
 }
@@ -1213,8 +1400,11 @@ component HomePage {
     in property <bool> service-lost: false;
     callback toggle();
     callback switch-mode();
+    callback copy-value(string);
 
     ScrollView {
+        horizontal-stretch: 1;
+        vertical-stretch: 1;
         VerticalLayout {
             padding-top: 0px;
             padding-bottom: 0px;
@@ -1222,6 +1412,7 @@ component HomePage {
             // 为 scrollbar 预留位置（Windows 上原生 scrollbar 几像素宽会与内容重叠）
             padding-right: 12px;
             spacing: Metrics.spacing-lg;
+            horizontal-stretch: 1;
 
             PageHeader {
                 title: "首页";
@@ -1294,12 +1485,14 @@ component HomePage {
             Card {
                 CardBody {
                     HorizontalLayout {
+                        horizontal-stretch: 1;
                         SectionTitle {
                             text: "当前模式";
                             horizontal-stretch: 1;
                         }
                         HorizontalLayout {
                             alignment: end;
+                            horizontal-stretch: 0;
                             Text {
                                 text: "前往配置";
                                 font-size: Typography.caption-size;
@@ -1315,6 +1508,7 @@ component HomePage {
                     if root.mode-index == 0: RouteOverlayCard {
                         bypass-ip: root.bypass-ip-text;
                         adapter-name: root.adapter-name;
+                        copy-value(text) => { root.copy-value(text); }
                     }
 
                     if root.mode-index == 1: AdapterReconfigCard {
@@ -1323,6 +1517,7 @@ component HomePage {
                         gateway: root.adapter-gateway;
                         dns: root.adapter-dns;
                         adapter-name: root.adapter-name;
+                        copy-value(text) => { root.copy-value(text); }
                     }
                 }
             }
@@ -1365,19 +1560,35 @@ component ConfigPage {
     callback launch-at-startup-changed(bool);
     callback dismiss-config-error();
 
-    ScrollView {
-        VerticalLayout {
-            padding-top: 0px;
-            padding-bottom: 0px;
-            padding-left: 0px;
-            padding-right: 12px;
-            // 分组之间 20~24px（规范第 21 节）。
-            spacing: Metrics.spacing-xl;
+    // 根是绝对定位容器（Rectangle）：ScrollView 铺满整页高度，底部操作栏
+    // 绝对定位悬浮在最上层（声明在 ScrollView 之后 → 绘制层级更高），
+    // 卡片滚动时从栏的下方穿过、被栏遮挡（sticky overlay，而非兄弟拼接）。
+    // 注意：本组件作为页面在 AppWindow 里实例化时需要显式
+    // horizontal-stretch / vertical-stretch: 1 才铺满。
+    Rectangle {
+        horizontal-stretch: 1;
+        vertical-stretch: 1;
 
-            PageHeader {
-                title: "配置";
-                subtitle: "选择旁路由生效模式，设置旁路由地址与检测策略。修改后点击「保存」生效。";
-            }
+        // 提示条留在内容流里滚动：它是「操作结果反馈」，不是常驻操作，
+        // 固定在底栏反而会让底栏高度随有无提示跳动。
+        ScrollView {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: 100%;
+            VerticalLayout {
+                padding-top: 0px;
+                padding-bottom: 0px;
+                padding-left: 0px;
+                padding-right: 12px;
+                // 分组之间 20~24px（规范第 21 节）。
+                spacing: Metrics.spacing-xl;
+                horizontal-stretch: 1;
+
+                PageHeader {
+                    title: "配置";
+                    subtitle: "选择旁路由生效模式，设置旁路由地址与检测策略。修改后点击「保存」生效。";
+                }
 
             // ---- 分组一：模式选择（按语义分组，不按控件类型分组；规范第 19 节）----
             Card {
@@ -1388,6 +1599,8 @@ component ConfigPage {
                     }
                     HorizontalLayout {
                         spacing: Metrics.spacing-md;
+                        horizontal-stretch: 1;
+                        // 两张模式卡等宽平分：都设 horizontal-stretch: 1。
                         ModeCard {
                             title: "路由叠加";
                             desc: "不改动网卡设置，通过添加 0.0.0.0/1 与 128.0.0.0/1 两条路由把流量导向旁路由。切换快、可随时撤销。";
@@ -1487,26 +1700,52 @@ component ConfigPage {
 
                     HorizontalLayout {
                         spacing: Metrics.spacing-lg;
+                        // 容器必须横向铺满，两个 FormRow 才能各占一半宽度；
+                        // 缺这行会让容器塌缩成内容固有宽度，右侧字段被挤出可视区。
+                        horizontal-stretch: 1;
                         FormRow {
                             label: "检测间隔";
-                            suffix: "秒";
-                            description: "范围 1 ~ 60 秒。";
+                            description: "允许范围 1 ~ 60 秒。";
                             horizontal-stretch: 1;
-                            NumberBox {
-                                minimum: 1;
-                                maximum: 60;
-                                value <=> root.interval-secs;
+                            // 数值框固定为「3 位数字 + 步进按钮」的宽度，
+                            // 单位以独立 Label 的形式紧跟在框后面（规范第 71 节：
+                            // 数值类控件按最大合理长度定宽，不随容器无限拉伸）。
+                            HorizontalLayout {
+                                spacing: Metrics.spacing-sm;
+                                alignment: start;
+                                NumberBox {
+                                    minimum: 1;
+                                    maximum: 60;
+                                    value <=> root.interval-secs;
+                                }
+                                Text {
+                                    text: "秒";
+                                    font-size: Typography.body-size;
+                                    color: Theme.text-secondary;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 0;
+                                }
                             }
                         }
                         FormRow {
                             label: "失败阈值";
-                            suffix: "次";
-                            description: "范围 1 ~ 10 次。";
+                            description: "允许范围 1 ~ 10 次。";
                             horizontal-stretch: 1;
-                            NumberBox {
-                                minimum: 1;
-                                maximum: 10;
-                                value <=> root.failure-threshold;
+                            HorizontalLayout {
+                                spacing: Metrics.spacing-sm;
+                                alignment: start;
+                                NumberBox {
+                                    minimum: 1;
+                                    maximum: 10;
+                                    value <=> root.failure-threshold;
+                                }
+                                Text {
+                                    text: "次";
+                                    font-size: Typography.body-size;
+                                    color: Theme.text-secondary;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 0;
+                                }
                             }
                         }
                     }
@@ -1554,31 +1793,56 @@ component ConfigPage {
                 dismissed => { root.dismiss-config-error(); }
             }
 
-            // ---- 操作区（同一区域只保留一个 Primary；规范第 39/41 节）----
-            HorizontalLayout {
-                spacing: Metrics.spacing-md;
-                alignment: end;
+            // 内容区底部留白 = 底栏高度 + 间距：滚动到底时最后一张卡片
+            // 能完整滚到悬浮操作栏上方，不会被遮挡。
+            Rectangle { height: 60px + Metrics.spacing-xl; }
+            }
+        }
 
-                Text {
-                    text: root.save-state == "saved" ? "已保存" : "";
-                    font-size: Typography.caption-size;
-                    color: Theme.success;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
+        // ---- 操作区（悬浮吸附在内容区底部，不随页面滚动）----
+        //
+        // 规范第 64 节：页面标题和关键操作可按需要固定。
+        // 声明在 ScrollView 之后 → 绘制在最上层，卡片从其下方穿过被遮挡；
+        // 背景取页面中性色（与内容区同色，不设分隔线），按钮在栏内垂直居中。
+        Rectangle {
+            width: 100%;
+            height: 60px;
+            y: parent.height - self.height;
+            background: Theme.bg-gray;
 
-                ToolButton {
-                    text: "恢复默认";
-                    enabled: root.save-state != "saving";
-                    clicked => { root.restore-default(); }
-                }
-                ToolButton {
-                    text: root.save-state == "saving" ? "保存中…" : "保存并应用";
-                    icon-data: root.save-state == "saving" ? Icons.spinner : Icons.save;
-                    accent: true;
-                    // 保存进行中禁止重复触发（规范第 72 节）。
-                    enabled: root.save-state != "saving";
-                    clicked => { root.save-config(); }
+            VerticalLayout {
+                height: 100%;
+                alignment: center;
+
+                // 提示条不再固定：它属于「内容流」，留在 ScrollView 内滚动；
+                // 固定栏只放真正需要常驻的操作（保存 / 恢复默认）与保存结果。
+                HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 32px;
+                    spacing: Metrics.spacing-md;
+                    alignment: end;
+
+                    Text {
+                        text: root.save-state == "saved" ? "已保存" : "";
+                        font-size: Typography.caption-size;
+                        color: Theme.success;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    ToolButton {
+                        text: "恢复默认";
+                        enabled: root.save-state != "saving";
+                        clicked => { root.restore-default(); }
+                    }
+                    ToolButton {
+                        text: root.save-state == "saving" ? "保存中…" : "保存并应用";
+                        icon-data: root.save-state == "saving" ? Icons.spinner : Icons.save;
+                        accent: true;
+                        // 保存进行中禁止重复触发（规范第 72 节）。
+                        enabled: root.save-state != "saving";
+                        clicked => { root.save-config(); }
+                    }
                 }
             }
         }
@@ -1612,6 +1876,7 @@ component LogRow {
             padding-left: Metrics.spacing-xs;
             padding-right: Metrics.spacing-xs;
             spacing: Metrics.spacing-sm;
+            horizontal-stretch: 1;
 
             // 时间列：固定窄宽度（时间类列固定宽度，规范第 55 节）。
             Rectangle {
@@ -1650,8 +1915,14 @@ component LogRow {
                 text: root.message;
                 font-size: Typography.label-size;
                 color: Theme.text-primary;
-                wrap: word-wrap;
-                vertical-alignment: top;
+                // 关键：用 elide 而不是 word-wrap。
+                // word-wrap 时「行高 ← 可用宽度 ← 视口宽度」构成循环依赖，
+                // 布局要多轮迭代才能收敛 —— 拖动窗口逐帧重算就表现为卡顿，
+                // 且中间态可能被采纳，把窗口宽度拉回 min-width。
+                // elide 是单行定高，行高与宽度无关，循环被彻底打断。
+                // 日志本来就适合单行显示，超长内容省略号截断即可。
+                overflow: elide;
+                vertical-alignment: center;
                 horizontal-stretch: 1;
             }
         }
@@ -1664,12 +1935,40 @@ component LogsPage {
     callback open-logs();
     callback refresh();
 
+    // 结构对齐 AboutPage / ConfigPage（用户建议：参考其他页面）。
+    //
+    // 历史教训：本页曾用「Rectangle 包一层 + min-width: 0」打断 layoutinfo
+    // 循环依赖，并且 AppWindow 上用 preferred-width: self.width 兜底。
+    // 但实测仍会抖动：把窗口缩到 760 再放大到 1000、来回切页若干次后，
+    // 宽度会掉回 min-width(720) —— 说明布局求解的中间态会被 Slint 采纳。
+    //
+    // 根因不在「有没有 Rectangle 根」，而在于本页内容宽度会反向依赖视口宽度：
+    // ScrollView 内的行以 word-wrap 排版，行高 ← 可用宽度 ← 视口宽度。
+    // 于是 preferred-width 在求解过程中出现「先小后大」的中间值，被采纳后
+    // 窗口就被套成 min-width。
+    //
+    // 解法（与 AboutPage 同构）：裸 VerticalLayout 根 + stretch，
+    // 去掉一切 min-width 补丁；滚动区域交给 ScrollView 自身，且不把它当作
+    // 尺寸来源 —— 见下方 ScrollView 处的说明。
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
     VerticalLayout {
         padding: 0px;
         spacing: Metrics.spacing-lg;
+        horizontal-stretch: 1;
+        vertical-stretch: 1;
 
+        // ---- 顶部标题 + 操作（固定在内容区顶部，不参与滚动）----
+        //
+        // 关键：把「标题行」和「日志列表」拆成两个兄弟节点，
+        //   - 标题行 vertical-stretch: 0：高度只取决于自身内容，窗口变高变矮
+        //     都保持原尺寸。ToolButton 的 min-width: 72px 也固定，
+        //     所以按钮大小不随窗口变化（用户问题 3）。
+        //   - 列表用 vertical-stretch: 1 吃满剩余高度，只有它在伸缩。
         HorizontalLayout {
             spacing: Metrics.spacing-md;
+            horizontal-stretch: 1;
+            vertical-stretch: 0;
             PageHeader {
                 title: "日志";
                 subtitle: "最近的界面与核心服务运行记录，按时间倒序，最多显示 200 条。";
@@ -1678,6 +1977,7 @@ component LogsPage {
             HorizontalLayout {
                 alignment: end;
                 spacing: Metrics.spacing-sm;
+                horizontal-stretch: 0;
                 ToolButton {
                     text: "刷新";
                     icon-data: Icons.refresh;
@@ -1694,9 +1994,11 @@ component LogsPage {
         Card {
             // 高度吃满窗口剩余空间，日志列表随窗口伸缩。
             vertical-stretch: 1;
+            horizontal-stretch: 1;
             VerticalLayout {
                 padding: 0px;
                 spacing: 0px;
+                horizontal-stretch: 1;
 
                 // 空状态 / 加载状态：不留白屏（规范第 47/48 节）。
                 // Slint 不支持 else if，用互斥条件表达三选一。
@@ -1716,17 +2018,38 @@ component LogsPage {
                         hint: "这里还没有可显示的日志。点击「刷新」重新读取，或确认核心服务正在运行。";
                     }
                 }
-                if !root.logs-loading && root.log-entries.length > 0: ScrollView {
+                // 日志列表。
+                //
+                // 三个必须同时满足的约束（否则窗口尺寸会被自动改小 / 拖窗口卡顿）：
+                //
+                //  1. 列表容器的高度不参与「向上」上报。做法是外层 Rectangle 给
+                //     确定的 vertical-stretch: 1，ScrollView 在其内部滚动。
+                //  2. 列表内容宽度必须由上而下确定，不能反向依赖视口宽度。
+                //     LogRow 的 message 是 word-wrap，若行宽绑定视口，则
+                //     行高 ← 行宽 ← 视口宽 形成循环，多轮才能收敛 → 拖窗口卡。
+                //     这里让内容容器 horizontal-stretch: 1，宽度直接取父级给定值。
+                //  3. 行内 message 用 elide 而不是 word-wrap：单行定高，
+                //     行的 preferred-height 与宽度无关，彻底消除循环。
+                //     与「日志」的阅读习惯也一致（超长行省略，悬浮可看全文）。
+                if !root.logs-loading && root.log-entries.length > 0: Rectangle {
+                    clip: true;
+                    horizontal-stretch: 1;
                     vertical-stretch: 1;
-                    VerticalLayout {
-                        padding: Metrics.spacing-sm;
-                        padding-right: Metrics.spacing-md;
-                        spacing: 0px;
-                        for entry[idx] in root.log-entries: LogRow {
-                            time: entry.time;
-                            level: entry.level;
-                            message: entry.message;
-                            row-index: idx;
+                    ScrollView {
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            padding: Metrics.spacing-sm;
+                            padding-right: Metrics.spacing-md;
+                            spacing: 0px;
+                            horizontal-stretch: 1;
+                            for entry[idx] in root.log-entries: LogRow {
+                                time: entry.time;
+                                level: entry.level;
+                                message: entry.message;
+                                row-index: idx;
+                                horizontal-stretch: 1;
+                            }
                         }
                     }
                 }
@@ -1745,6 +2068,7 @@ component AboutPage {
     VerticalLayout {
         padding: 0px;
         spacing: Metrics.spacing-lg;
+        horizontal-stretch: 1;
         vertical-stretch: 1;
 
         HorizontalLayout {
@@ -1796,6 +2120,7 @@ component AboutPage {
             }
             HorizontalLayout {
                 alignment: center;
+                horizontal-stretch: 1;
                 Text {
                     text: "Windows 桌面旁路由一键切换工具。支持路由叠加与网卡直改两种模式，具备旁路由异常自动侦测与回退能力。";
                     font-size: Typography.caption-size;
@@ -1831,12 +2156,31 @@ export component AppWindow inherits Window {
     // std-widgets 的默认字号统一 14px（正文）。
     default-font-family: "Segoe UI Variable";
     default-font-size: Typography.body-size;
-    // 窗口尺寸：侧栏按规范加宽到 200px 后，同步放宽默认宽度，
-    // 保证右侧表单（Label→Input→Description）仍有舒适阅读宽度（规范第 10/11 节）。
-    preferred-width: 880px;
-    preferred-height: 600px;
+    // 窗口尺寸策略。
+    //
+    // 现象：打开应用后点击日志页，窗口宽度从 880 被突然压到 720（= min-width）。
+    //
+    // 完整机制（读 Slint 1.17 源码定位，i-slint-backend-winit +
+    // i-slint-core::layout::min_max_size_for_layout_constraints）：
+    //   1. 切页会改变窗口布局约束，触发 winit 后端的约束更新；
+    //   2. 日志页内容含百分比首选尺寸（ScrollView preferred-*: 100%）与
+    //      width: 100% 的 Card，自底向上求解布局信息时形成循环，
+    //      求解失败时 max 约束退化为 0；
+    //   3. 核心公式：max_width = h.max.max(h.min) —— max 一旦为 0，
+    //      就回落到 min！于是窗口 max 约束 = min-width = 720；
+    //   4. winit 调 set_max_inner_size(720)，操作系统把 880 的窗口钳到 720。
+    //      这也是为什么所有补丁变体都精确缩到 720：回落值永远是 min-width。
+    //
+    // 修法：给窗口显式声明巨大的 max 约束。h.max 永远非 0，
+    // 「回落到 min」的分支永远走不到，窗口不再被钳。
+    // （16777215 = 后端自身使用的窗口尺寸上限常量。）
+    // min-* 仍是内容不重叠、不裁剪的底线（规范第 69 节）。
+    // 注意：不要用 preferred-width: self.width 这类自引用绑定来「锚定」尺寸——
+    // 它本身会构成 layoutinfo 循环，反而更容易触发第 2 步的退化求解。
     min-width: 720px;
     min-height: 520px;
+    max-width: 16777215px;
+    max-height: 16777215px;
 
     in property <string> status-text: "未连接到核心服务";
     in property <bool> is-enabled: false;
@@ -1899,6 +2243,8 @@ export component AppWindow inherits Window {
     callback dismiss-config-error();
     // 主动触发「拉取最新网卡列表 + 刷新首页下方卡片」
     callback refresh-adapters();
+    // 复制只读字段的完整值到系统剪贴板（KeyValueRow 悬浮浮层里的「复制」）。
+    callback copy-value(string);
 
     property <color> status-color: root.is-fallback ? Theme.error
         : (root.is-enabled ? Theme.success : Theme.text-secondary);
@@ -2006,12 +2352,24 @@ export component AppWindow inherits Window {
 
         Rectangle {
             background: Theme.bg-gray;
+            // 内容区必须吃掉侧栏之外的剩余宽度，否则整块会按内容固有宽度摆放、右侧被裁切。
+            horizontal-stretch: 1;
+            // 内容区「首选宽度」下限 = 设计内容宽度（880 - 200 侧栏 = 680）。
+            //
+            // 为什么用 preferred-width 而不是 min-width：
+            //   min-width 会同时抬高布局下限，使窗口无法被用户缩到该值以下；
+            //   而这里只需要保证「根元素派生出的 preferred-width 不低于设计宽度」，
+            //   避免 Slint 因内容固有宽度偏小（实测约 244px）而把窗口压小。
+            //   preferred-width 只影响首选项，不干预用户手动缩放到更小。
             HorizontalLayout {
                 // 内容区 padding（规范第 10 节）。
                 padding: Metrics.content-padding;
                 spacing: 0px;
-
+                horizontal-stretch: 1;
+                // HorizontalLayout 内的页面实例（ScrollView 根）需要显式拉伸才铺满。
                 if root.current-page == 0: HomePage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
                     status-text: root.status-text;
                     status-kind: root.status-kind;
                     is-enabled: root.is-enabled;
@@ -2028,9 +2386,12 @@ export component AppWindow inherits Window {
                     service-lost: root.service-lost;
                     toggle => { root.toggle-bypass(); }
                     switch-mode => { root.current-page = 1; }
+                    copy-value(text) => { root.copy-value(text); }
                 }
 
                 if root.current-page == 1: ConfigPage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
                     mode-index <=> root.mode-index;
                     adapter-names: root.adapter-names;
                     adapter-index <=> root.adapter-index;
@@ -2058,6 +2419,8 @@ export component AppWindow inherits Window {
                 }
 
                 if root.current-page == 2: LogsPage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
                     log-entries: root.log-entries;
                     logs-loading: root.logs-loading;
                     open-logs => { root.open-logs(); }
@@ -2070,7 +2433,29 @@ export component AppWindow inherits Window {
                     version-text: root.version-text;
                     check-update => { root.check-update(); }
                     horizontal-stretch: 1;
+                    vertical-stretch: 1;
                 }
+            }
+
+            // 全局单例悬浮浮层：声明在页面布局之后 → 绘制在最上层，
+            // 不会被卡片/行的白底盖住。位置由 TooltipState（鼠标窗口坐标）
+            // 换算成本 Rectangle 局部坐标，并夹取在本区域内。
+            // InlineTooltip 自身尺寸由内容推导（见组件注释）。
+            if TooltipState.visible: InlineTooltip {
+                x: clamp(TooltipState.mouse-wx + TooltipStyle.offset
+                             - parent.absolute-position.x,
+                         4px,
+                         max(4px, parent.width - self.width - 4px));
+                y: clamp(TooltipState.mouse-wy + TooltipStyle.offset
+                             - parent.absolute-position.y,
+                         4px,
+                         max(4px, parent.height - self.height - 4px));
+                // 箭头对准光标的横向位置（换算成浮层内偏移并夹取在箭头区内）。
+                arrow-x: clamp(TooltipState.mouse-wx - parent.absolute-position.x
+                                   - self.x,
+                               8px,
+                               max(8px, self.width - TooltipStyle.arrow-size * 2 - 8px));
+                text: TooltipState.text;
             }
         }
     }

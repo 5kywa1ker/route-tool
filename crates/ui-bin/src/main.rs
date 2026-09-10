@@ -9,12 +9,13 @@ mod ipc_client;
 mod notify;
 mod single_instance;
 mod tray;
+mod ui_clipboard;
 
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use tracing_subscriber::EnvFilter;
 
 use ipc_protocol::{AdapterInfo, AppConfig, HealthStatus, SwitchMode};
@@ -26,6 +27,13 @@ const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 /// 直改模式子网掩码的默认值（用户未填时）。
 const DEFAULT_MASK: &str = "255.255.255.0";
+
+/// 初始窗口尺寸（逻辑像素 / DIP）。
+///
+/// 与 appwindow.slint 的 preferred-width/height 一致：Windows 上 preferred-*
+/// 只是布局提示，可能被平台默认值覆盖，导致内容区被裁切，因此这里显式设置。
+const INITIAL_WINDOW_WIDTH: f32 = 880.0;
+const INITIAL_WINDOW_HEIGHT: f32 = 600.0;
 
 /// 日志目录。
 const CORE_LOG_DIR: &str = r"C:\ProgramData\RouteTool\logs";
@@ -528,6 +536,22 @@ fn main() -> anyhow::Result<()> {
     let app = AppWindow::new()?;
     app.window()
         .on_close_requested(move || slint::CloseRequestResponse::HideWindow);
+    // 初始窗口尺寸：传「逻辑尺寸」，由 Slint 负责按显示器 DPI 换算物理像素。
+    //
+    // 注意不要自己乘缩放因子：`set_size(PhysicalSize)` 仍会被 Slint 再乘一次
+    // scale（实测 125% 缩放下传 PhysicalSize(1100,750) 会得到 1375x938 客户区，
+    // 即 1100×1.25）。传入 LogicalSize(880,600) 得到的客户区恰为 1100x750 物理
+    // = 880x600 逻辑，正是设计所需。
+    app.window().set_size(slint::LogicalSize::new(
+        INITIAL_WINDOW_WIDTH,
+        INITIAL_WINDOW_HEIGHT,
+    ));
+    tracing::debug!(
+        "初始窗口尺寸: 逻辑 {}x{}, 实际 {:?}",
+        INITIAL_WINDOW_WIDTH,
+        INITIAL_WINDOW_HEIGHT,
+        app.window().size()
+    );
     let tray = tray::Tray::new()?;
     let _ = tray::SHARED_TRAY.set(tray::StaticTray(tray));
 
@@ -768,6 +792,20 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ---- UI 回调：复制只读字段的完整值到系统剪贴板 ----
+    // KeyValueRow 的值被省略号截断时，悬浮浮层提供「复制」，保证
+    // 「视觉上可以截断，但信息本身不能不可访问」（规范第 26/63 节）。
+    // 直接在 UI 线程写剪贴板：OpenClipboard 对同一线程是重入安全的，
+    // 且这里只做一次短操作，不值得为它起任务/线程。
+    app.on_copy_value(|text| {
+        if text.is_empty() {
+            return;
+        }
+        if let Err(e) = ui_clipboard::set_text(text.as_str()) {
+            tracing::warn!("写入剪贴板失败: {e:#}");
+        }
+    });
+
     // ---- UI 回调：保存配置 ----
     {
         let state = state.clone();
@@ -942,14 +980,18 @@ fn main() -> anyhow::Result<()> {
     });
 
     // ---- UI 回调：刷新日志 ----
-    // 先切到「正在读取日志…」（规范第 48 节：明确告诉用户在做什么），
-    // 再在后台线程读文件，避免在 UI 线程同步做文件 IO 造成卡顿。
+    // 文件 IO 全部在后台线程执行，UI 线程只做回填，不会阻塞任何界面操作。
+    // 首次打开（还没有任何数据）时先切到「正在读取日志…」空状态再异步加载；
+    // 已有数据时**静默刷新**：旧列表继续显示、可正常交互，后台读完原位替换，
+    // 因此每次切换到日志页都不会白屏/闪烁，打开观感与其他页面一致。
     {
         let app_weak = app.as_weak();
         app.on_refresh_logs(move || {
             let app_weak = app_weak.clone();
             if let Some(app) = app_weak.upgrade() {
-                app.set_logs_loading(true);
+                if app.get_log_entries().row_count() == 0 {
+                    app.set_logs_loading(true);
+                }
             }
             std::thread::spawn(move || {
                 let entries = read_logs();
