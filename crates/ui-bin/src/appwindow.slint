@@ -696,9 +696,15 @@ component NumberBox {
     // 固定宽度：够放 3 位数字 + 两个步进按钮（规范第 71 节：数值类控件按
     // 最大合理长度定宽）。以前是 horizontal-stretch: 1，在双列表单里会被
     // 拉到半屏宽，与「3 位数字」的语义完全不匹配。
-    // 不再横向拉伸：宽度 = 10(左内边距) + 数字区(3 字符，由 min-width 兜底)
-    //        + 2 + 22 + 22(两个步进按钮) + 4(右内边距)
-    width: 96px;
+    //
+    // 宽度必须 ≥ 子元素最小宽度之和，否则布局被过度约束：数字区已经压到
+    // min-width 不能再缩，多出来的部分只能向右溢出，而 Slint 默认不裁剪，
+    // 表现就是两个步进三角画到输入框边框右侧之外（旧版写死 96px，
+    // 而子项最小宽度之和是 112px，于是箭头跑出框外）。
+    // 这里用表达式而非写死数字，改内边距 / 按钮宽度时不会再失配。
+    // 组成：10(左内边距) + (3 字符 × 14px + 10 光标余量) + 2(间距)
+    //       + 22 + 22(两个步进按钮) + 4(右内边距) = 112px
+    width: 10px + (3 * Typography.body-num * 1px + 10px) + 2px + 22px + 22px + 4px;
     min-height: 36px;
 
     function apply-new-value(v: int) {
@@ -981,12 +987,17 @@ component ModeCard {
     in property <bool> selected;
     callback clicked();
 
-    // 卡片必须能被压缩到与兄弟卡相同的宽度：
-    // 根 Rectangle 若不给 min-width: 0，它的最小宽度会取内容固有宽度
-    // （标题单行 + 图标 + 内边距），于是「说明文字更长的那张卡」更宽，
-    // 两张卡在 HorizontalLayout 里就不等宽了。
-    // 置 0 后宽度完全由 horizontal-stretch 平分决定，两卡必然等宽。
+    // 两张模式卡必须等宽，靠「三项布局参数完全一致」保证（只设其中一项都不行）：
+    //   1) min-width: 0 —— 去掉内容固有最小宽度这块地板（标题单行 + 图标 +
+    //      内边距会给出一个下限），否则两卡下限不同；
+    //   2) preferred-width —— 关键项。HorizontalLayout 在空间不足时按
+    //      「preferred - min」的比例收缩子项：说明文字越长 preferred 越大，
+    //      收缩后反而越宽。旧版只设了 min-width: 0，实测两卡就是不等宽的；
+    //      统一成固定值后两卡 min/preferred/stretch 完全相同，
+    //      容器变宽变窄都逐像素等宽；
+    //   3) horizontal-stretch: 1 —— 空间富余时平分多出来的宽度。
     min-width: 0px;
+    preferred-width: 320px;
     horizontal-stretch: 1;
 
     Rectangle {
