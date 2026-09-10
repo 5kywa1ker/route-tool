@@ -1,12 +1,18 @@
 // RouteTool 设置窗口 —— 侧边栏多页面布局（首页 / 配置 / 日志 / 关于）。
 //
-// 排版原则（见 RouteTool_UI_字体排版规范.md）：
+// 设计依据：《Windows11_桌面应用_UI通用设计规范.md》
 //   - 字体：Segoe UI Variable（中文 fallback 微软雅黑 UI），由 Window.default-font-family
-//     统一指定，DPI 缩放交给 Slint 逻辑 px，不针对缩放比例单独改字号。
+//     统一指定；DPI 缩放交给 Slint 逻辑 px，不针对缩放比例单独改字号（规范第 6 节）。
 //   - 字号/字重：全部走 Typography Token（12/13/14/16/20px，字重仅 400/600），
-//     禁止 10/11px 常规字号与其他字重。
-//   - 窗口 720×520 / 最小 660×460；左侧栏 140；页面 padding 14；card padding 12。
-//   - 等宽：配置页 ModeCard 横向 stretch 1:1；首页 StatItem stretch 1:1。
+//     禁止 10/11px 常规字号与其他字重（规范第 3/4 节）。
+//   - 尺寸/间距/圆角全部走 Metrics Token，避免散落魔法数字（规范第 22 章）。
+//   - 窗口 860×580 / 最小 720×520；左侧栏 200；页面 padding 20；卡片 padding 16
+//     （规范第 10 节：侧栏 200~220、内容 padding 24、卡片 padding 16）。
+//   - 导航项 40px 高、圆角 8px，具备 Normal/Hover/Pressed/Selected/Focus 五态
+//     （规范第 13/14 节）；Selected = 轻量品牌色底 + 左侧色条 + 品牌色图标 + Semibold。
+//   - 表单遵循 Label → Input → Description 结构，字段间距 16 / 组间距 20~24
+//     （规范第 18/21 节）；字段级错误由 error 属性驱动（规范第 23/34 节）。
+//   - 状态一律「图标 + 文案 + 颜色」共同表达，不单靠颜色（规范第 46 节）。
 //   - 状态显示组件统一由 main.rs 的轮询定时器刷新；
 //     「切换到首页 / 窗口重新可见 / 启用-禁用切换」三个时机会主动触发
 //     refresh-adapters 回调，让首页下方网卡信息即时同步。
@@ -16,21 +22,51 @@
 import { Button, ComboBox, LineEdit, CheckBox, ScrollView } from "std-widgets.slint";
 
 // 全局主题色
+//
+// 色值体系（规范第 22 章 Design Token / 第 23 节不依赖颜色表达语义）：
+//   - 品牌色 accent-blue + accent-hover/accent-pressed 三级交互色；
+//   - 中性面 bg-gray（页面底）/ card-gray（卡片底）/ border-gray（描边）；
+//   - 交互态 hover / pressed / subtle 供菜单项与列表行复用，
+//     避免每个组件各自硬编码 rgba 造成深浅不一致；
+//   - 语义色 success / error / warning 各自带 -bg 浅底，
+//     用于状态徽标与内联提示卡片（图标 + 文案 + 颜色共同表达，不单靠颜色）。
 export global Theme {
     out property <color> accent-blue: #0078d4;
+    out property <color> accent-hover: #0067b8;
+    out property <color> accent-pressed: #005a9e;
+    out property <color> accent-soft: #e8f4fd;   // 品牌色浅底（选中态背景）
+
     out property <color> bg-gray: #f3f3f3;
     out property <color> card-gray: #fafafa;
     out property <color> border-gray: #e5e5e5;
+    out property <color> border-strong: #d0d0d0;
+
+    // 交互态填充（统一定义，保证菜单/列表/按钮悬浮深浅一致）
+    out property <color> hover-fill: #ececec;
+    out property <color> pressed-fill: #e0e0e0;
+    out property <color> subtle-fill: #f7f7f7;
+
     out property <color> text-primary: #1a1a1a;
     out property <color> text-secondary: #5d5d5d;
     out property <color> text-tertiary: #888888;
+    // 禁用态文字（规范第 23 节 Disabled）：与三级文字区分，更浅且不可交互
+    out property <color> text-disabled: #a8a8a8;
+
     out property <color> success: #0f7b0f;
+    out property <color> success-bg: #f0f9e8;
     out property <color> error: #c42b1c;
+    out property <color> error-bg: #fde7e3;
     out property <color> warning: #9c5b00;
+    out property <color> warning-bg: #fff3d6;
+    out property <color> info-bg: #e8f4fd;
+
+    // 焦点环（规范第 14 节 Keyboard Focus：不能只依赖 Hover）
+    out property <color> focus-ring: #0078d4;
 }
 
-// 字体排版 Token（规范文档第 12 节）：所有控件从这里取字号，
+// 字体排版 Token（规范第 3 节字号层级）：所有控件从这里取字号，
 // 不要在控件里散落硬编码 px 字号。
+//   行高按规范第 5 节配套：12→18 / 13→20 / 14→20 / 16→24 / 20→28 / 24→32。
 export global Typography {
     out property <length> display-size: 24px;  // 大标题（预留）
     out property <length> title-size: 20px;    // 页面标题 / 核心指标 / 状态数值
@@ -38,6 +74,43 @@ export global Typography {
     out property <length> body-size: 14px;     // 正文 / 输入框 / 按钮
     out property <length> label-size: 13px;    // 表单标签 / 字段名 / 日志
     out property <length> caption-size: 12px;  // 辅助说明 / 提示
+
+    out property <length> display-line: 32px;
+    out property <length> title-line: 28px;
+    out property <length> heading-line: 24px;
+    out property <length> body-line: 20px;
+    out property <length> label-line: 20px;
+    out property <length> caption-line: 18px;
+
+    // 纯数值单位（用于 computed 值参与算术，如 "N 秒" 这类需要按 N 调整的尺寸）
+    out property <float> title-num: 20;
+    out property <float> heading-num: 16;
+    out property <float> body-num: 14;
+    out property <float> caption-num: 12;
+}
+
+// 间距 / 尺寸 / 圆角 Token（规范第 78~81 节）。
+// 组件只从这里取，避免散落魔法数字导致间距不一致。
+export global Metrics {
+    out property <length> spacing-xs: 4px;
+    out property <length> spacing-sm: 8px;
+    out property <length> spacing-md: 12px;
+    out property <length> spacing-lg: 16px;
+    out property <length> spacing-xl: 20px;
+    out property <length> spacing-2xl: 24px;
+
+    out property <length> radius-sm: 6px;
+    out property <length> radius-md: 8px;
+    out property <length> radius-lg: 12px;
+
+    // 控件高度（规范第 80 节 Control）
+    out property <length> control-compact: 32px;
+    out property <length> control-std: 36px;
+    out property <length> control-nav: 40px;
+
+    // 内容区 padding（规范第 10 节：24px）与卡片 padding（16px）
+    out property <length> content-padding: 20px;
+    out property <length> card-padding: 16px;
 }
 
 // 界面图标（Fluent UI System Icons, MIT License, via Iconify API）。
@@ -51,6 +124,27 @@ export global Icons {
     out property <string> router: "M12 3.5A7.5 7.5 0 0 0 4.5 11v.25a.75.75 0 0 1-1.5 0V11a9 9 0 0 1 18 0v.25a.75.75 0 0 1-1.5 0V11A7.5 7.5 0 0 0 12 3.5m0 3A4.5 4.5 0 0 0 7.5 11v.25a.75.75 0 0 1-1.5 0V11a6 6 0 1 1 12 0v.25a.75.75 0 0 1-1.5 0V11A4.5 4.5 0 0 0 12 6.5M12 8a3 3 0 0 0-.75 5.906V16H6a3 3 0 1 0 0 6h12a3 3 0 1 0 0-6h-5.25v-2.094A3.001 3.001 0 0 0 12 8m-1.5 3a1.5 1.5 0 1 1 3 0a1.5 1.5 0 0 1-3 0M6 17.5h12a1.5 1.5 0 0 1 0 3H6a1.5 1.5 0 0 1 0-3";
     out property <string> refresh: "M12 4.5a7.5 7.5 0 1 0 7.419 6.392c-.067-.454.265-.892.724-.892c.37 0 .696.256.752.623Q21 11.297 21 12a9 9 0 1 1-3-6.708V4.25a.75.75 0 0 1 1.5 0v3a.75.75 0 0 1-.75.75h-3a.75.75 0 0 1 0-1.5h1.35a7.47 7.47 0 0 0-5.1-2";
     out property <string> folder-open: "M3.5 6.25c0-.966.784-1.75 1.75-1.75h2.88a.75.75 0 0 1 .53.22l2.06 2.06c.142.141.332.22.531.22h5.5c.967 0 1.75.784 1.75 1.75q.001.13.041.246H8.72a3.75 3.75 0 0 0-3.25 1.874L3.5 14.283zM2 17.788A3.25 3.25 0 0 0 5.25 21H11q.044 0 .086-.005h5.195a3.75 3.75 0 0 0 3.248-1.875l3.03-5.25c1.216-2.104-.225-4.72-2.602-4.868A.8.8 0 0 0 20 8.75a3.25 3.25 0 0 0-3.25-3.25h-5.19L9.72 3.659A2.25 2.25 0 0 0 8.129 3H5.25A3.25 3.25 0 0 0 2 6.25zm6.719-7.292h11.026c1.347 0 2.19 1.458 1.515 2.625l-3.03 5.25a2.25 2.25 0 0 1-1.949 1.124H5.255c-1.347 0-2.19-1.458-1.516-2.625l3.031-5.25a2.25 2.25 0 0 1 1.949-1.124";
+    // ---- 状态语义图标（规范第 46 节：图标 + 文案 + 颜色共同表达）----
+    // 已连接 / 正常（实心圆点 + 勾）
+    out property <string> status-ok: "M12 1.75a10.25 10.25 0 1 0 0 20.5a10.25 10.25 0 0 0 0-20.5m4.28 7.03a.75.75 0 0 1 0 1.06l-5 5a.75.75 0 0 1-1.06 0l-2.5-2.5a.75.75 0 1 1 1.06-1.06l1.97 1.97l4.47-4.47a.75.75 0 0 1 1.06 0";
+    // 警告（三角感叹号）
+    out property <string> status-warn: "M9.1 3.42a3.35 3.35 0 0 1 5.8 0l7.35 12.73A3.35 3.35 0 0 1 19.35 21H4.65a3.35 3.35 0 0 1-2.9-5.85zM13.45 4.2a1.85 1.85 0 0 0-2.9 0L3.2 16.93a1.85 1.85 0 0 0 1.45 2.57h14.7a1.85 1.85 0 0 0 1.45-2.57zM12 8.5a.75.75 0 0 1 .75.75v4a.75.75 0 0 1-1.5 0v-4A.75.75 0 0 1 12 8.5m1 7.5a1 1 0 1 1-2 0a1 1 0 0 1 2 0";
+    // 失败 / 错误（圆叉）
+    out property <string> status-error: "M12 1.75a10.25 10.25 0 1 0 0 20.5a10.25 10.25 0 0 0 0-20.5M6.97 6.97a.75.75 0 0 1 1.06 0L12 10.94l3.97-3.97a.75.75 0 1 1 1.06 1.06L13.06 12l3.97 3.97a.75.75 0 1 1-1.06 1.06L12 13.06l-3.97 3.97a.75.75 0 0 1-1.06-1.06L10.94 12L6.97 8.03a.75.75 0 0 1 0-1.06";
+    // 未运行 / 直连（空心圆）
+    out property <string> status-idle: "M12 2.25a9.75 9.75 0 1 0 0 19.5a9.75 9.75 0 0 0 0-19.5m0 1.5a8.25 8.25 0 1 1 0 16.5a8.25 8.25 0 0 1 0-16.5";
+    // 未连接服务（断开链接）
+    out property <string> link-off: "M2.22 2.22a.75.75 0 0 1 1.06 0l18.5 18.5a.75.75 0 1 1-1.06 1.06l-3.28-3.28l-1.99 1.99a3.75 3.75 0 0 1-5.3-5.3l1.5-1.5a.75.75 0 0 1 1.06 1.06l-1.5 1.5a2.25 2.25 0 1 0 3.18 3.18l2-2l-8.5-8.5l-1.99 1.99a2.25 2.25 0 0 0-.17 3l-1.06 1.06a3.75 3.75 0 0 1 .17-5.12l1.99-1.99l-3.28-3.28a.75.75 0 0 1 0-1.06m13.6 3.05l-1.6 1.6a.75.75 0 0 1-1.06-1.06l1.6-1.6a3.75 3.75 0 0 1 5.3 5.3l-2 2a.75.75 0 1 1-1.06-1.06l2-2a2.25 2.25 0 0 0-3.18-3.18";
+    // 复制（双页）
+    out property <string> copy: "M8.5 2a2.5 2.5 0 0 0-2.5 2.5v10A2.5 2.5 0 0 0 8.5 17h7a2.5 2.5 0 0 0 2.5-2.5v-10A2.5 2.5 0 0 0 15.5 2zm-1 2.5a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1zM3.5 7.5A2.5 2.5 0 0 0 6 5v11.5a1 1 0 0 0 1 1h6v.5a1.5 1.5 0 0 1-1.5 1.5h-6.5A2.5 2.5 0 0 1 2.5 17V9a1.5 1.5 0 0 1 1-1.42M6 5a2.5 2.5 0 0 1 1.5-2.29V5z";
+    // 关闭（用于可关闭提示条）
+    out property <string> dismiss: "M4.397 4.554l.073-.084a.75.75 0 0 1 .976-.073l.084.073L12 10.939l6.47-6.47a.75.75 0 1 1 1.06 1.061L13.061 12l6.47 6.47a.75.75 0 0 1 .072.976l-.073.084a.75.75 0 0 1-.976.073l-.084-.073L12 13.061l-6.47 6.47a.75.75 0 0 1-1.06-1.061L10.939 12l-6.47-6.47a.75.75 0 0 1-.072-.976z";
+    // 保存 / 已保存
+    out property <string> save: "M5 2.5A3.5 3.5 0 0 0 1.5 6v12A3.5 3.5 0 0 0 5 21.5h14a3.5 3.5 0 0 0 3.5-3.5V8.06a3.5 3.5 0 0 0-1.025-2.474l-2.56-2.56A3.5 3.5 0 0 0 16.44 2H16v5.5A2.5 2.5 0 0 1 13.5 10h-5A2.5 2.5 0 0 1 6 7.5V4.06A3.5 3.5 0 0 0 5 2.5M3 6a2 2 0 0 1 2-2h.5v3.5a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V3.5H16.44c.53 0 1.04.211 1.414.586l2.56 2.56c.375.375.586.884.586 1.414V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM6 15.5a1.5 1.5 0 0 1 1.5-1.5h9a1.5 1.5 0 0 1 0 3h-9A1.5 1.5 0 0 1 6 15.5";
+    // 旋转（进行中）
+    out property <string> spinner: "M12 2.75a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5a.75.75 0 0 1 .75-.75m0 14.5a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0V18a.75.75 0 0 1 .75-.75m8.5-5.25a.75.75 0 0 1-.75.75h-3.5a.75.75 0 0 1 0-1.5h3.5a.75.75 0 0 1 .75.75M6.25 12a.75.75 0 0 1-.75.75H2a.75.75 0 0 1 0-1.5h3.5a.75.75 0 0 1 .75.75m12.03-6.28a.75.75 0 0 1 0 1.06l-2.47 2.47a.75.75 0 0 1-1.06-1.06l2.47-2.47a.75.75 0 0 1 1.06 0M9.25 12.28a.75.75 0 0 1 0 1.06l-2.47 2.47a.75.75 0 0 1-1.06-1.06l2.47-2.47a.75.75 0 0 1 1.06 0m9.03 5.94a.75.75 0 0 1-1.06 1.06l-2.47-2.47a.75.75 0 1 1 1.06-1.06zM7.22 9.25a.75.75 0 0 1-1.06 1.06L3.69 7.84a.75.75 0 0 1 1.06-1.06z";
+    // 空状态（收件盘）
+    out property <string> empty: "M6.5 3A3.5 3.5 0 0 0 3.05 5.75l-1.5 4.5A4 4 0 0 0 1.5 11.4V17A4 4 0 0 0 5.5 21h13a4 4 0 0 0 4-4v-5.6q0-.59-.05-1.15l-1.5-4.5A3.5 3.5 0 0 0 17.5 3zM17.5 4.5c.96 0 1.82.61 2.13 1.52l1.35 4.04A4 4 0 0 0 20 10h-2.53a2.75 2.75 0 0 0-2.6 1.87a1.25 1.25 0 0 1-1.18.85h-3.38a1.25 1.25 0 0 1-1.18-.85A2.75 2.75 0 0 0 6.53 10H4a4 4 0 0 0-1 .14l1.36-4.1A2.25 2.25 0 0 1 6.5 4.5zM4 11.5h2.53c.63 0 1.19.4 1.4 1a2.75 2.75 0 0 0 2.58 1.72h3.38a2.75 2.75 0 0 0 2.58-1.72c.21-.6.77-1 1.4-1H20v5.5a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17z";
 }
 
 // 日志条目模型
@@ -63,10 +157,14 @@ export struct LogEntry {
 // ------------------------------------------------------------------
 // 通用组件
 // ------------------------------------------------------------------
+
+// 面板卡片：白底 + 1px 描边 + 8~12px 圆角（规范第 10 节 / 速查表 Card Radius）。
+// 不再用浅灰底（card-gray）——页面底已是 #f3f3f3，卡片再用灰会层级不清；
+// 白底 + 细描边才是 Fluent 的卡片语言。
 component Card {
     Rectangle {
-        background: Theme.card-gray;
-        border-radius: 10px;
+        background: #ffffff;
+        border-radius: Metrics.radius-lg;
         border-width: 1px;
         border-color: Theme.border-gray;
         drop-shadow-offset-x: 0;
@@ -74,6 +172,207 @@ component Card {
         drop-shadow-blur: 4px;
         drop-shadow-color: #00000006;
         @children
+    }
+}
+
+// 卡片内标准内边距容器（规范第 10 节 Card Padding 16px）。
+component CardBody {
+    VerticalLayout {
+        padding: Metrics.card-padding;
+        spacing: Metrics.spacing-md;
+        @children
+    }
+}
+
+// 卡片/区块标题（规范第 3 节 Heading 16px/600）。
+component SectionTitle {
+    in property <string> text;
+    in property <string> hint;
+    VerticalLayout {
+        spacing: Metrics.spacing-xs;
+        Text {
+            text: root.text;
+            font-size: Typography.heading-size;
+            font-weight: 600;
+            color: Theme.text-primary;
+        }
+        if root.hint != "": Text {
+            text: root.hint;
+            font-size: Typography.caption-size;
+            color: Theme.text-tertiary;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// 页面标题块（规范第 16 节：20px/600 + 12~13px 副说明）。
+component PageHeader {
+    in property <string> title;
+    in property <string> subtitle;
+    VerticalLayout {
+        spacing: Metrics.spacing-xs;
+        Text {
+            text: root.title;
+            font-size: Typography.title-size;
+            font-weight: 600;
+            color: Theme.text-primary;
+        }
+        if root.subtitle != "": Text {
+            text: root.subtitle;
+            font-size: Typography.caption-size;
+            color: Theme.text-secondary;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// 状态指示（规范第 46 节）：图标 + 文案 + 颜色三者共同表达，不单靠颜色。
+// kind: 0=正常 1=注意 2=失败 3=未运行
+component StatusBadge {
+    in property <string> text;
+    in property <int> kind: 0;
+    in property <bool> compact: false;
+
+    property <string> icon: root.kind == 0 ? Icons.status-ok
+        : (root.kind == 1 ? Icons.status-warn
+        : (root.kind == 2 ? Icons.status-error : Icons.status-idle));
+    property <color> tone: root.kind == 0 ? Theme.success
+        : (root.kind == 1 ? Theme.warning
+        : (root.kind == 2 ? Theme.error : Theme.text-secondary));
+
+    HorizontalLayout {
+        spacing: Metrics.spacing-sm;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: root.compact ? 16px : 18px;
+                height: root.compact ? 16px : 18px;
+                fill: root.tone;
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: root.icon;
+            }
+        }
+        Text {
+            text: root.text;
+            font-size: root.compact ? Typography.caption-size : Typography.body-size;
+            font-weight: 600;
+            color: Theme.text-primary;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+// 内联提示条（规范第 59/60/61 节）：成功/提示用轻量反馈，不进模态。
+// kind: 0=成功 1=注意 2=失败 3=信息
+component InlineBanner {
+    in property <string> text;
+    in property <int> kind: 0;
+    in property <bool> show-close: false;
+    callback dismissed();
+
+    property <color> tone: root.kind == 0 ? Theme.success
+        : (root.kind == 1 ? Theme.warning
+        : (root.kind == 2 ? Theme.error : Theme.accent-blue));
+    property <color> fill: root.kind == 0 ? Theme.success-bg
+        : (root.kind == 1 ? Theme.warning-bg
+        : (root.kind == 2 ? Theme.error-bg : Theme.info-bg));
+    property <string> icon: root.kind == 0 ? Icons.status-ok
+        : (root.kind == 1 ? Icons.status-warn
+        : (root.kind == 2 ? Icons.status-error : Icons.about));
+
+    Rectangle {
+        background: root.fill;
+        border-radius: Metrics.radius-md;
+        border-width: 1px;
+        border-color: root.tone;
+        HorizontalLayout {
+            padding: Metrics.spacing-md;
+            spacing: Metrics.spacing-sm;
+            alignment: start;
+            VerticalLayout {
+                alignment: center;
+                Path {
+                    width: 16px;
+                    height: 16px;
+                    fill: root.tone;
+                    viewbox-x: 0;
+                    viewbox-y: 0;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: root.icon;
+                }
+            }
+            Text {
+                text: root.text;
+                font-size: Typography.label-size;
+                color: Theme.text-primary;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            if root.show-close: VerticalLayout {
+                alignment: center;
+                close-ta := TouchArea {
+                    width: 16px;
+                    height: 16px;
+                    clicked => { root.dismissed(); }
+                }
+                Path {
+                    width: 12px;
+                    height: 12px;
+                    fill: close-ta.has-hover ? Theme.text-primary : Theme.text-tertiary;
+                    viewbox-x: 0;
+                    viewbox-y: 0;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: Icons.dismiss;
+                }
+            }
+        }
+    }
+}
+
+// 空状态（规范第 47/53 节）：不能只留空白容器。
+component EmptyState {
+    in property <string> title;
+    in property <string> hint;
+
+    VerticalLayout {
+        spacing: Metrics.spacing-sm;
+        alignment: center;
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 32px;
+                height: 32px;
+                fill: Theme.text-tertiary;
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: Icons.empty;
+            }
+        }
+        Text {
+            text: root.title;
+            font-size: Typography.body-size;
+            font-weight: 600;
+            color: Theme.text-secondary;
+            horizontal-alignment: center;
+        }
+        if root.hint != "": Text {
+            text: root.hint;
+            font-size: Typography.caption-size;
+            color: Theme.text-tertiary;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
     }
 }
 
@@ -115,17 +414,132 @@ component ToggleSwitch {
     }
 }
 
+// 表单字段容器（规范第 18/21/24 节）：
+//   Label → Input → Description 三段式；字段间距 16px；
+//   Label→Input 6~8px；Input→Description 4~6px。
+//   error 非空时：控件描边转错误色，Description 位置改显错误文案，
+//   并用图标 + 文案表达错误而不是只靠红色（规范第 23 节）。
+//   长 Label 允许自然换行，不撑破布局、不覆盖相邻控件（规范第 24 节）。
 component FormRow {
     in property <string> label;
+    in property <string> description;
+    in property <string> error;
+    in property <string> suffix;
 
     VerticalLayout {
-        spacing: 4px;
-        Text {
-            text: root.label;
-            font-size: Typography.label-size;
-            color: Theme.text-secondary;
+        spacing: Metrics.spacing-md;
+
+        VerticalLayout {
+            spacing: 6px;
+
+            // Label 行：字段名 + 可选的短后缀（如「（秒）」单位）。
+            HorizontalLayout {
+                spacing: Metrics.spacing-xs;
+                Text {
+                    text: root.label;
+                    font-size: Typography.label-size;
+                    color: root.error != "" ? Theme.error : Theme.text-secondary;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+                if root.suffix != "": Text {
+                    text: root.suffix;
+                    font-size: Typography.caption-size;
+                    color: Theme.text-tertiary;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+            }
+
+            @children
         }
-        @children
+
+        // 错误优先于描述显示：同一位置不叠加两行，避免水平布局跳动（规范第 34 节）。
+        // 用互斥的两个 if 表达「错误 → 否则描述」（Slint 不支持 else if）。
+        if root.error != "": HorizontalLayout {
+            spacing: Metrics.spacing-xs;
+            alignment: start;
+            VerticalLayout {
+                alignment: center;
+                Path {
+                    width: 14px;
+                    height: 14px;
+                    fill: Theme.error;
+                    viewbox-x: 0;
+                    viewbox-y: 0;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: Icons.status-error;
+                }
+            }
+            Text {
+                text: root.error;
+                font-size: Typography.caption-size;
+                color: Theme.error;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+        }
+        if root.error == "" && root.description != "": Text {
+            text: root.description;
+            font-size: Typography.caption-size;
+            color: Theme.text-tertiary;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// 文本输入框（包装 std-widgets 的 LineEdit，规范第 22/23/25 节）。
+//
+// 用 LineEdit 而不是裸 TextInput：LineEdit 自带 placeholder-text / read-only /
+// has-focus / 清除按钮 / 水平滚动，这些正是规范第 23/25 节要求的输入状态与
+// 长单行值行为（光标可见、文本可水平滚动，不在框内强制换行）。
+// 自绘外壳是为了让错误态描边、禁用态、Focus 表现与其他自绘控件统一。
+component TextField {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <bool> has-error: false;
+    in property <bool> enabled: true;
+    callback edited(string);
+
+    horizontal-stretch: 1;
+
+    states [
+        disabled when !root.enabled: {
+            frame.background: Theme.bg-gray;
+            frame.border-color: Theme.border-gray;
+        }
+        error when root.has-error && root.enabled: {
+            frame.background: #ffffff;
+            frame.border-color: Theme.error;
+        }
+        focused when input.has-focus && root.enabled: {
+            frame.background: #ffffff;
+            frame.border-color: Theme.accent-blue;
+        }
+        normal when true: {
+            frame.background: #ffffff;
+            frame.border-color: hover.has-hover ? Theme.border-strong : Theme.border-gray;
+        }
+    ]
+
+    frame := Rectangle {
+        border-radius: Metrics.radius-sm;
+
+        hover := TouchArea { }
+
+        input := LineEdit {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: 100%;
+            text <=> root.text;
+            placeholder-text: root.placeholder;
+            enabled: root.enabled;
+            font-size: Typography.body-size;
+            min-height: Metrics.control-std;
+            edited(text) => { root.edited(text); }
+        }
     }
 }
 
@@ -248,6 +662,8 @@ component NumberBox {
     }
 }
 
+// 首页核心指标卡（规范第 17 节二级信息：核心内容 / 关键数据）。
+// Label 13px → Value 20px/600 → 辅助说明 12px，三层字号建立明确层级。
 component StatItem {
     in property <string> label;
     in property <string> value;
@@ -256,15 +672,12 @@ component StatItem {
 
     Rectangle {
         background: #ffffff;
-        border-radius: 8px;
+        border-radius: Metrics.radius-md;
         border-width: 1px;
         border-color: Theme.border-gray;
         VerticalLayout {
-            padding-top: 12px;
-            padding-bottom: 12px;
-            padding-left: 14px;
-            padding-right: 14px;
-            spacing: 4px;
+            padding: Metrics.spacing-md;
+            spacing: Metrics.spacing-xs;
             Text {
                 text: root.label;
                 font-size: Typography.label-size;
@@ -275,29 +688,37 @@ component StatItem {
                 font-size: Typography.title-size;
                 font-weight: 600;
                 color: root.value-color;
+                overflow: elide;
             }
             if root.sub-value != "": Text {
                 text: root.sub-value;
                 font-size: Typography.caption-size;
                 color: Theme.text-tertiary;
+                overflow: elide;
             }
         }
     }
 }
 
-// 首页卡片「key 左 / value 右」行。
+// 首页卡片「key 左 / value 右」行（规范第 43/44 节 Key-Value 展示）。
 //   - key 固有宽度靠左；value 区 horizontal-stretch: 1 吃掉剩余宽度并右对齐
 //     （HorizontalLayout 里 Text 默认 stretch=1，key 必须显式置 0，
 //     否则 key 的框撑满整行把 value 顶到行尾——v0.1.17 二次踩坑）。
-//   - value 超宽时省略号截断，鼠标悬浮在该行弹出完整内容浮层
-//     （浮层相对 value 区定位，父级 Rectangle 默认不裁剪，可溢出卡片显示）。
+//   - 只读数据不用 Input 模拟（规范第 42 节），保持 Label + Value 结构。
+//   - value 超宽时省略号截断，鼠标悬浮弹出完整内容浮层 + 提供「复制」，
+//     保证「视觉可截断，但信息不可不可访问」（规范第 26/63 节）。
 component KeyValueRow {
     in property <string> key;
     in property <string> value;
     in property <color> value-color: Theme.text-primary;
+    in property <string> empty-text: "未设置";
+
+    property <string> display-value: root.value == "" ? root.empty-text : root.value;
+    property <bool> is-empty: root.value == "";
 
     HorizontalLayout {
-        spacing: 6px;
+        spacing: Metrics.spacing-sm;
+
         Text {
             text: root.key;
             font-size: Typography.label-size;
@@ -305,45 +726,89 @@ component KeyValueRow {
             vertical-alignment: center;
             horizontal-stretch: 0;
         }
+
         Rectangle {
             height: 20px;
             horizontal-stretch: 1;
+
             hover := TouchArea { }
+
             Text {
                 width: 100%;
-                text: root.value;
+                text: root.display-value;
                 font-size: Typography.label-size;
-                color: root.value-color;
+                color: root.is-empty ? Theme.text-tertiary : root.value-color;
                 overflow: elide;
                 horizontal-alignment: right;
                 vertical-alignment: center;
             }
-            if hover.has-hover && root.value != "": Rectangle {
+
+            // 悬浮浮层：完整值（可换行）+ 一键复制（规范第 63 节）。
+            // 父级 Rectangle 默认不裁剪，浮层可溢出卡片显示。
+            if hover.has-hover && !root.is-empty: Rectangle {
                 x: parent.width - self.width;
                 y: parent.height + 6px;
-                width: 340px;
+                width: 300px;
                 background: #ffffff;
-                border-radius: 6px;
+                border-radius: Metrics.radius-sm;
                 border-width: 1px;
-                border-color: Theme.border-gray;
+                border-color: Theme.border-strong;
                 drop-shadow-offset-x: 0;
                 drop-shadow-offset-y: 2px;
                 drop-shadow-blur: 8px;
                 drop-shadow-color: #22000000;
                 VerticalLayout {
-                    padding: 8px;
+                    padding: Metrics.spacing-md;
+                    spacing: Metrics.spacing-sm;
                     Text {
                         text: root.value;
                         font-size: Typography.caption-size;
                         color: Theme.text-primary;
                         wrap: word-wrap;
                     }
+                    HorizontalLayout {
+                        spacing: Metrics.spacing-xs;
+                        alignment: end;
+                        // 复制按钮：固定尺寸的点击热区，内部放文字，避免
+                        // TouchArea 尺寸绑定到自身子文本造成布局环。
+                        Rectangle {
+                            width: copy-text.width + Metrics.spacing-md;
+                            height: 20px;
+                            background: copy-ta.has-hover ? Theme.hover-fill : transparent;
+                            border-radius: 3px;
+
+                            copy-ta := TouchArea {
+                                clicked => {
+                                    copied = true;
+                                    copy-timer.start();
+                                }
+                            }
+                            copy-text := Text {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                text: copied ? "已复制" : "复制";
+                                font-size: Typography.caption-size;
+                                color: copied ? Theme.success : Theme.accent-blue;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
+
+    property <bool> copied: false;
+    // 复制反馈 1.5s 后复位（Timer 不能声明 id，用实例名引用）。
+    copy-timer := Timer {
+        interval: 1.5s;
+        running: false;
+        triggered => { root.copied = false; }
+    }
 }
 
+// 模式选择卡（规范第 35 节：选项较少时直接显示全部选项）。
+// 状态：Normal / Hover / Pressed / Selected。Selected 用品牌色描边 + 轻量底 +
+// 右上角对勾图标（图标 + 颜色双重表达，不只靠颜色；规范第 22 节）。
 component ModeCard {
     in property <string> title;
     in property <string> desc;
@@ -352,24 +817,27 @@ component ModeCard {
     callback clicked();
 
     Rectangle {
-        background: root.selected ? #e8f4fd : #ffffff;
-        border-radius: 10px;
+        background: root.selected ? Theme.accent-soft
+            : (ta.pressed ? Theme.pressed-fill
+            : (ta.has-hover ? Theme.subtle-fill : #ffffff));
+        border-radius: Metrics.radius-lg;
         border-width: root.selected ? 2px : 1px;
-        border-color: root.selected ? Theme.accent-blue : Theme.border-gray;
+        border-color: root.selected ? Theme.accent-blue
+            : (ta.has-hover ? Theme.border-strong : Theme.border-gray);
+
         VerticalLayout {
-            padding-top: 12px;
-            padding-bottom: 6px;
-            padding-left: 14px;
-            padding-right: 14px;
-            spacing: 6px;
+            padding: Metrics.card-padding;
+            spacing: Metrics.spacing-sm;
+
             HorizontalLayout {
-                spacing: 10px;
+                spacing: Metrics.spacing-md;
                 alignment: start;
+
                 Rectangle {
                     width: 32px;
                     height: 32px;
                     background: root.selected ? #ffffff : Theme.bg-gray;
-                    border-radius: 8px;
+                    border-radius: Metrics.radius-md;
                     Path {
                         x: 6px;
                         y: 6px;
@@ -383,56 +851,71 @@ component ModeCard {
                         commands: root.icon-data;
                     }
                 }
+
                 VerticalLayout {
-                    spacing: 3px;
+                    spacing: Metrics.spacing-xs;
                     alignment: center;
+                    horizontal-stretch: 1;
                     Text {
                         text: root.title;
                         font-size: Typography.heading-size;
                         font-weight: 600;
                         color: Theme.text-primary;
                     }
-                    Text {
-                        text: root.desc;
-                        font-size: Typography.caption-size;
-                        color: Theme.text-secondary;
-                        wrap: word-wrap;
+                }
+
+                // 选中标记：形状 + 颜色，不只靠颜色区分（可访问性）。
+                if root.selected: VerticalLayout {
+                    alignment: center;
+                    Path {
+                        width: 18px;
+                        height: 18px;
+                        fill: Theme.accent-blue;
+                        viewbox-x: 0;
+                        viewbox-y: 0;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.status-ok;
                     }
                 }
             }
-            if root.selected: Text {
-                text: "已选择";
+
+            Text {
+                text: root.desc;
                 font-size: Typography.caption-size;
-                color: Theme.accent-blue;
-                horizontal-alignment: right;
+                color: Theme.text-secondary;
+                wrap: word-wrap;
             }
         }
-        TouchArea {
+
+        ta := TouchArea {
             clicked => { root.clicked(); }
         }
     }
 }
 
+// 当前模式详情卡（首页）。
+// 只读信息用 Label + Value 结构展示，不用 Input 模拟（规范第 42 节）。
 component RouteOverlayCard {
     in property <string> bypass-ip;
     in property <string> adapter-name;
 
     Rectangle {
-        background: #ffffff;
-        border-radius: 10px;
+        background: Theme.subtle-fill;
+        border-radius: Metrics.radius-md;
         border-width: 1px;
         border-color: Theme.border-gray;
         VerticalLayout {
-            padding: 14px;
-            spacing: 10px;
+            padding: Metrics.spacing-md;
+            spacing: Metrics.spacing-md;
             HorizontalLayout {
-                spacing: 10px;
+                spacing: Metrics.spacing-md;
                 alignment: start;
                 Rectangle {
                     width: 32px;
                     height: 32px;
-                    background: #e8f4fd;
-                    border-radius: 8px;
+                    background: Theme.info-bg;
+                    border-radius: Metrics.radius-md;
                     Path {
                         x: 6px;
                         y: 6px;
@@ -449,6 +932,7 @@ component RouteOverlayCard {
                 VerticalLayout {
                     spacing: 2px;
                     alignment: center;
+                    horizontal-stretch: 1;
                     Text {
                         text: "路由叠加";
                         font-size: Typography.heading-size;
@@ -462,7 +946,7 @@ component RouteOverlayCard {
                     }
                 }
             }
-            KeyValueRow { key: "网卡"; value: root.adapter-name; }
+            KeyValueRow { key: "网卡"; value: root.adapter-name; empty-text: "未选择"; }
             KeyValueRow { key: "旁路由 IP"; value: root.bypass-ip; }
         }
     }
@@ -476,21 +960,21 @@ component AdapterReconfigCard {
     in property <string> adapter-name;
 
     Rectangle {
-        background: #ffffff;
-        border-radius: 10px;
+        background: Theme.subtle-fill;
+        border-radius: Metrics.radius-md;
         border-width: 1px;
         border-color: Theme.border-gray;
         VerticalLayout {
-            padding: 14px;
-            spacing: 10px;
+            padding: Metrics.spacing-md;
+            spacing: Metrics.spacing-md;
             HorizontalLayout {
-                spacing: 10px;
+                spacing: Metrics.spacing-md;
                 alignment: start;
                 Rectangle {
                     width: 32px;
                     height: 32px;
-                    background: #f0f9e8;
-                    border-radius: 8px;
+                    background: Theme.success-bg;
+                    border-radius: Metrics.radius-md;
                     Path {
                         x: 6px;
                         y: 6px;
@@ -507,6 +991,7 @@ component AdapterReconfigCard {
                 VerticalLayout {
                     spacing: 2px;
                     alignment: center;
+                    horizontal-stretch: 1;
                     Text {
                         text: "网卡直改";
                         font-size: Typography.heading-size;
@@ -520,43 +1005,70 @@ component AdapterReconfigCard {
                     }
                 }
             }
-            KeyValueRow { key: "网卡"; value: root.adapter-name; }
-            KeyValueRow { key: "网卡 IP"; value: root.ip; }
-            KeyValueRow { key: "子网掩码"; value: root.mask; }
-            KeyValueRow { key: "网关"; value: root.gateway; }
-            KeyValueRow { key: "DNS"; value: root.dns; }
+            KeyValueRow { key: "网卡"; value: root.adapter-name; empty-text: "未选择"; }
+            KeyValueRow { key: "网卡 IP"; value: root.ip; empty-text: "未获取"; }
+            KeyValueRow { key: "子网掩码"; value: root.mask; empty-text: "未获取"; }
+            KeyValueRow { key: "网关"; value: root.gateway; empty-text: "未获取"; }
+            KeyValueRow { key: "DNS"; value: root.dns; empty-text: "未获取"; }
         }
     }
 }
 
+// 侧边栏一级导航项（规范第 13/14 节）。
+//   尺寸：40px 高、圆角 8px、左右 padding 12px、图标 18px、图标文字间距 12px。
+//   状态：Normal / Hover / Pressed / Selected / Keyboard Focus 全部覆盖。
+//   Selected 用「轻量品牌色底 + 左侧 3px 色条 + 品牌色图标 + Semibold 文字」，
+//   避免大面积高饱和实心背景（规范第 14 节）。
 component SidebarItem {
     in property <string> icon-data;
     in property <string> label;
     in property <bool> selected;
     callback clicked();
 
+    height: Metrics.control-nav;
+    // VerticalLayout 里元素默认 vertical-stretch=1，会把 40px 的菜单项
+    // 拉伸铺满整栏高度（表现为菜单上下分散）。固定为 0，剩余空间交给
+    // 主布局里的弹性填充块，菜单项从上到下紧凑排列。
+    vertical-stretch: 0;
+
     Rectangle {
-        height: 34px;
-        // VerticalLayout 里元素默认 vertical-stretch=1，会把 34px 的菜单项
-        // 拉伸铺满整栏高度（表现为菜单上下分散）。固定为 0，剩余空间交给
-        // 主布局里的弹性填充块，菜单项从上到下紧凑排列。
-        vertical-stretch: 0;
-        background: root.selected ? #e8f4fd : transparent;
-        border-radius: 6px;
+        background: root.selected ? Theme.accent-soft
+            : (ta.pressed ? Theme.pressed-fill
+            : (ta.has-hover ? Theme.hover-fill : transparent));
+        border-radius: Metrics.radius-md;
+        width: 100%;
+        height: 100%;
+
+        // 选中态左侧品牌色条：不依赖颜色也能通过位置/形状识别当前页。
+        if root.selected: Rectangle {
+            x: 0;
+            y: (parent.height - self.height) / 2;
+            width: 3px;
+            height: parent.height - 14px;
+            border-radius: 2px;
+            background: Theme.accent-blue;
+        }
+
+        // 焦点环：键盘 Tab 到达时显示，不能只依赖 Hover（规范第 14 节）。
+        if scope.has-focus: Rectangle {
+            background: transparent;
+            border-radius: Metrics.radius-md;
+            border-width: 1px;
+            border-color: Theme.focus-ring;
+        }
+
         HorizontalLayout {
-            padding-top: 6px;
-            padding-bottom: 6px;
-            padding-left: 10px;
-            padding-right: 10px;
-            spacing: 10px;
+            padding-left: Metrics.spacing-md;
+            padding-right: Metrics.spacing-md;
+            spacing: Metrics.spacing-md;
             alignment: start;
             // 图标上下居中：Rectangle 不支持 vertical-alignment，
             // 用 VerticalLayout 包一层让内层 alignment: center 生效。
             VerticalLayout {
                 alignment: center;
                 Path {
-                    width: 16px;
-                    height: 16px;
+                    width: 18px;
+                    height: 18px;
                     fill: root.selected ? Theme.accent-blue : Theme.text-secondary;
                     viewbox-x: 0;
                     viewbox-y: 0;
@@ -573,29 +1085,64 @@ component SidebarItem {
                 vertical-alignment: center;
             }
         }
-        TouchArea {
-            clicked => { root.clicked(); }
+
+        // FocusScope 让菜单项参与 Tab 遍历并具备键盘激活能力；
+        // Space / Enter 触发与鼠标点击一致的行为。
+        scope := FocusScope {
+            width: 100%;
+            height: 100%;
+            key-pressed(event) => {
+                if event.text == " " || event.text == "\n" {
+                    root.clicked();
+                    accept
+                } else {
+                    reject
+                }
+            }
+            ta := TouchArea {
+                clicked => { root.clicked(); }
+            }
         }
     }
 }
 
-// 紧凑工具按钮（规范「紧凑按钮 32px」）：文字 14px/600，可带 16px SVG 前置图标，
-// accent 形态为蓝色实底白字（如「检查更新」）。
+// 紧凑工具按钮（规范第 39 节：紧凑按钮 32px，Standard 36px）。
+// 层级：accent=Primary（品牌蓝实底白字）/ 默认=Secondary（浅底细描边）。
+// 状态覆盖 Normal / Hover / Pressed / Keyboard Focus / Disabled（规范第 14 节）。
+// 文案不做两行换行，宽度由内容决定（规范第 40 节）。
 component ToolButton {
     in property <string> text;
     in property <string> icon-data;
     in property <bool> accent;
+    in property <bool> standard: false;
+    in property <bool> enabled: true;
     callback clicked();
 
+    height: root.standard ? Metrics.control-std : Metrics.control-compact;
+    min-width: 72px;
+
     Rectangle {
-        height: 32px;
-        background: root.accent ? Theme.accent-blue : Theme.bg-gray;
-        border-radius: 6px;
+        width: 100%;
+        height: 100%;
+        background: !root.enabled ? Theme.bg-gray
+            : (root.accent
+                ? (ta.pressed ? Theme.accent-pressed : (ta.has-hover ? Theme.accent-hover : Theme.accent-blue))
+                : (ta.pressed ? Theme.pressed-fill : (ta.has-hover ? Theme.hover-fill : Theme.bg-gray)));
+        border-radius: Metrics.radius-sm;
         border-width: root.accent ? 0px : 1px;
         border-color: Theme.border-gray;
+
+        // 焦点环：键盘可达性（规范第 14 节）。
+        if btn-scope.has-focus && root.enabled: Rectangle {
+            background: transparent;
+            border-radius: Metrics.radius-sm;
+            border-width: 1px;
+            border-color: root.accent ? #ffffff : Theme.focus-ring;
+        }
+
         HorizontalLayout {
-            padding-left: 12px;
-            padding-right: 12px;
+            padding-left: Metrics.spacing-md;
+            padding-right: Metrics.spacing-md;
             spacing: 6px;
             alignment: center;
             // 图标上下居中：Rectangle/Path 不支持 vertical-alignment，
@@ -606,7 +1153,8 @@ component ToolButton {
                 Path {
                     width: 16px;
                     height: 16px;
-                    fill: root.accent ? #ffffff : Theme.text-primary;
+                    fill: !root.enabled ? Theme.text-disabled
+                        : (root.accent ? #ffffff : Theme.text-primary);
                     viewbox-x: 0;
                     viewbox-y: 0;
                     viewbox-width: 24;
@@ -618,12 +1166,29 @@ component ToolButton {
                 text: root.text;
                 font-size: Typography.body-size;
                 font-weight: 600;
-                color: root.accent ? #ffffff : Theme.text-primary;
+                color: !root.enabled ? Theme.text-disabled
+                    : (root.accent ? #ffffff : Theme.text-primary);
                 vertical-alignment: center;
             }
         }
-        TouchArea {
-            clicked => { root.clicked(); }
+
+        // FocusScope 让按钮参与 Tab 遍历；Space / Enter 触发与点击一致。
+        btn-scope := FocusScope {
+            width: 100%;
+            height: 100%;
+            enabled: root.enabled;
+            key-pressed(event) => {
+                if event.text == " " || event.text == "\n" {
+                    root.clicked();
+                    accept
+                } else {
+                    reject
+                }
+            }
+            ta := TouchArea {
+                enabled: root.enabled;
+                clicked => { root.clicked(); }
+            }
         }
     }
 }
@@ -633,7 +1198,7 @@ component ToolButton {
 // ------------------------------------------------------------------
 component HomePage {
     in property <string> status-text;
-    in property <color> status-color;
+    in property <int> status-kind: 3;
     in property <bool> is-enabled;
     in property <bool> is-fallback;
     in property <int> latency-ms;
@@ -645,6 +1210,7 @@ component HomePage {
     in property <string> adapter-gateway;
     in property <string> adapter-dns;
     in property <string> adapter-name;
+    in property <bool> service-lost: false;
     callback toggle();
     callback switch-mode();
 
@@ -655,65 +1221,62 @@ component HomePage {
             padding-left: 0px;
             // 为 scrollbar 预留位置（Windows 上原生 scrollbar 几像素宽会与内容重叠）
             padding-right: 12px;
-            spacing: 12px;
+            spacing: Metrics.spacing-lg;
+
+            PageHeader {
+                title: "首页";
+                subtitle: "查看当前旁路由状态与生效模式，可在此快速启用或停用。";
+            }
+
+            // 核心服务断开时给出明确告警（规范第 49 节：发生了什么 + 下一步）。
+            if root.service-lost: InlineBanner {
+                kind: 2;
+                text: "未连接到核心服务。当前页面显示的数据可能不是最新状态，请确认 RouteToolCore 服务是否正在运行，稍后会自动重连。";
+            }
 
             Card {
-                VerticalLayout {
-                    padding: 14px;
-                    spacing: 12px;
+                CardBody {
+                    // 状态行：图标 + 文案 + 颜色共同表达（规范第 46 节）。
                     HorizontalLayout {
-                        spacing: 10px;
+                        spacing: Metrics.spacing-md;
                         alignment: start;
-                        VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 10px;
-                                height: 10px;
-                                border-radius: 5px;
-                                background: root.status-color;
-                                drop-shadow-offset-x: 0;
-                                drop-shadow-offset-y: 0;
-                                drop-shadow-blur: 6px;
-                                drop-shadow-color: root.status-color;
-                            }
+
+                        StatusBadge {
+                            text: root.status-text;
+                            kind: root.status-kind;
+                            horizontal-stretch: 1;
                         }
-                        VerticalLayout {
-                            spacing: 3px;
-                            Text {
-                                text: root.status-text;
-                                font-size: Typography.heading-size;
-                                font-weight: 600;
-                                color: Theme.text-primary;
-                            }
-                            Text {
-                                text: root.is-enabled ? "当前流量已通过旁路由" : "当前为直连状态";
-                                font-size: Typography.caption-size;
-                                color: Theme.text-secondary;
-                            }
-                        }
+
                         HorizontalLayout {
                             alignment: end;
                             ToggleSwitch {
                                 checked: root.is-enabled;
-                                text: "启用旁路由";
+                                text: root.is-enabled ? "已启用" : "已停用";
                                 toggled => { root.toggle(); }
                             }
                         }
                     }
 
+                    Text {
+                        text: root.is-enabled ? "当前流量已通过旁路由转发" : "当前为直连状态，流量不经旁路由";
+                        font-size: Typography.caption-size;
+                        color: Theme.text-secondary;
+                        wrap: word-wrap;
+                    }
+
                     HorizontalLayout {
-                        spacing: 10px;
+                        spacing: Metrics.spacing-md;
                         StatItem {
                             label: "延迟";
-                            value: root.latency-ms >= 0 ? root.latency-ms + " ms" : "--";
-                            sub-value: root.is-enabled ? "旁路由" : "";
+                            value: root.latency-ms >= 0 ? root.latency-ms + " ms" : "未检测";
+                            sub-value: root.latency-ms >= 0 ? "到旁路由" : "启用后开始探测";
                             horizontal-stretch: 1;
                         }
                         StatItem {
                             label: "连通性";
-                            value: root.is-fallback ? "异常" : (root.is-enabled ? "正常" : "--");
+                            value: root.is-fallback ? "异常" : (root.is-enabled ? "正常" : "未检测");
                             value-color: root.is-fallback ? Theme.error : (root.is-enabled ? Theme.success : Theme.text-secondary);
-                            sub-value: root.is-enabled ? "检测中" : "";
+                            sub-value: root.is-fallback ? "已自动回退" : (root.is-enabled ? "自动探测中" : "--");
                             horizontal-stretch: 1;
                         }
                         // 「检测间隔」替代原「上次检测」：检测是自动跑的，不需要
@@ -729,22 +1292,19 @@ component HomePage {
             }
 
             Card {
-                VerticalLayout {
-                    padding: 14px;
-                    spacing: 10px;
+                CardBody {
                     HorizontalLayout {
-                        Text {
+                        SectionTitle {
                             text: "当前模式";
-                            font-size: Typography.heading-size;
-                            font-weight: 600;
-                            color: Theme.text-primary;
+                            horizontal-stretch: 1;
                         }
                         HorizontalLayout {
                             alignment: end;
                             Text {
-                                text: "切换模式";
+                                text: "前往配置";
                                 font-size: Typography.caption-size;
                                 color: Theme.accent-blue;
+                                vertical-alignment: center;
                                 TouchArea {
                                     clicked => { root.switch-mode(); }
                                 }
@@ -793,10 +1353,17 @@ component ConfigPage {
     in-out property <bool> notifications;
     in-out property <bool> launch-at-startup;
     in property <string> config-error;
+    in property <int> config-error-kind: 2;
+    in property <string> save-state;
+    in property <string> err-bypass-ip;
+    in property <string> err-static-ip;
+    in property <string> err-mask;
+    in property <string> err-dns;
     callback adapter-changed(int);
     callback save-config();
     callback restore-default();
     callback launch-at-startup-changed(bool);
+    callback dismiss-config-error();
 
     ScrollView {
         VerticalLayout {
@@ -804,30 +1371,26 @@ component ConfigPage {
             padding-bottom: 0px;
             padding-left: 0px;
             padding-right: 12px;
-            spacing: 12px;
+            // 分组之间 20~24px（规范第 21 节）。
+            spacing: Metrics.spacing-xl;
 
-            Text {
-                text: "配置";
-                font-size: Typography.title-size;
-                font-weight: 600;
-                color: Theme.text-primary;
+            PageHeader {
+                title: "配置";
+                subtitle: "选择旁路由生效模式，设置旁路由地址与检测策略。修改后点击「保存」生效。";
             }
 
+            // ---- 分组一：模式选择（按语义分组，不按控件类型分组；规范第 19 节）----
             Card {
-                VerticalLayout {
-                    padding: 14px;
-                    spacing: 12px;
-                    Text {
-                        text: "选择模式";
-                        font-size: Typography.heading-size;
-                        font-weight: 600;
-                        color: Theme.text-primary;
+                CardBody {
+                    SectionTitle {
+                        text: "生效模式";
+                        hint: "两种模式互斥，同一时间只能使用一种。";
                     }
                     HorizontalLayout {
-                        spacing: 12px;
+                        spacing: Metrics.spacing-md;
                         ModeCard {
                             title: "路由叠加";
-                            desc: "通过旁路由 IP 转发流量";
+                            desc: "不改动网卡设置，通过添加 0.0.0.0/1 与 128.0.0.0/1 两条路由把流量导向旁路由。切换快、可随时撤销。";
                             icon-data: Icons.layer;
                             selected: root.mode-index == 0;
                             horizontal-stretch: 1;
@@ -835,7 +1398,7 @@ component ConfigPage {
                         }
                         ModeCard {
                             title: "网卡直改";
-                            desc: "修改网卡 IP / 网关 / DNS";
+                            desc: "直接把网卡 IP、网关、DNS 指向旁路由。兼容性更好，但会改动系统网络设置。";
                             icon-data: Icons.router;
                             selected: root.mode-index == 1;
                             horizontal-stretch: 1;
@@ -845,92 +1408,111 @@ component ConfigPage {
                 }
             }
 
+            // ---- 分组二：连接设置（Label → Input → Description；规范第 18 节）----
             Card {
-                VerticalLayout {
-                    padding: 14px;
-                    spacing: 12px;
-                    Text {
+                CardBody {
+                    SectionTitle {
                         text: root.mode-index == 0 ? "旁路由设置" : "网卡直改设置";
-                        font-size: Typography.heading-size;
-                        font-weight: 600;
-                        color: Theme.text-primary;
+                        hint: root.mode-index == 0
+                            ? "指定旁路由 IP，流量将通过该地址转发。"
+                            : "指定旁路由 IP，并可直接改写网卡地址与 DNS。";
                     }
 
                     FormRow {
                         label: "网卡";
+                        description: root.adapter-index < 0 ? "暂未读取到网卡列表，请确认核心服务正在运行。" : "流量从这里选择的网卡发出；标注「未连接」的网卡当前未插网线或未关联。";
                         ComboBox {
                             model: root.adapter-names;
                             current-index <=> root.adapter-index;
-                            min-height: 36px;
+                            min-height: Metrics.control-std;
+                            enabled: root.adapter-names.length > 0;
                             selected => { root.adapter-changed(self.current-index); }
                         }
                     }
 
                     FormRow {
                         label: "旁路由 IP";
-                        LineEdit {
+                        description: "填写旁路由的局域网地址，例如 192.168.123.105。";
+                        error: root.err-bypass-ip;
+                        TextField {
                             text <=> root.bypass-ip-text;
-                            min-height: 36px;
-                            placeholder-text: "例如 192.168.123.105";
+                            placeholder: "例如 192.168.123.105";
+                            has-error: root.err-bypass-ip != "";
                         }
                     }
 
                     if root.mode-index == 1: VerticalLayout {
-                        spacing: 10px;
+                        spacing: Metrics.spacing-lg;
                         FormRow {
                             label: "网卡静态 IP";
-                            LineEdit {
+                            description: "留空则保留网卡当前 IP 不变。";
+                            error: root.err-static-ip;
+                            TextField {
                                 text <=> root.static-ip-text;
-                                min-height: 36px;
-                                placeholder-text: "留空则保留当前 IP";
+                                placeholder: "例如 192.168.2.100";
+                                has-error: root.err-static-ip != "";
                             }
                         }
                         FormRow {
                             label: "子网掩码";
-                            LineEdit {
+                            description: "留空则使用默认值 255.255.255.0。";
+                            error: root.err-mask;
+                            TextField {
                                 text <=> root.mask-text;
-                                min-height: 36px;
-                                placeholder-text: "255.255.255.0";
+                                placeholder: "255.255.255.0";
+                                has-error: root.err-mask != "";
                             }
                         }
                         FormRow {
                             label: "DNS";
-                            LineEdit {
+                            description: "多个地址用逗号分隔；留空则使用旁路由 IP 作为 DNS。";
+                            error: root.err-dns;
+                            TextField {
                                 text <=> root.dns-text;
-                                min-height: 36px;
-                                placeholder-text: "留空则使用旁路由 IP";
+                                placeholder: "例如 192.168.123.105, 223.5.5.5";
+                                has-error: root.err-dns != "";
                             }
                         }
                     }
                 }
             }
 
+            // ---- 分组三：检测与恢复（高级选项按需展示；规范第 6 节渐进披露）----
             Card {
-                VerticalLayout {
-                    padding: 14px;
-                    spacing: 10px;
-                    Text {
-                        text: "高级选项";
-                        font-size: Typography.heading-size;
-                        font-weight: 600;
-                        color: Theme.text-primary;
+                CardBody {
+                    SectionTitle {
+                        text: "检测与恢复";
+                        hint: "核心服务会按检测间隔探测旁路由，连续失败达到阈值后自动回退到直连，避免断网。";
                     }
-                    FormRow {
-                        label: "检测间隔（秒）";
-                        NumberBox {
-                            minimum: 1;
-                            maximum: 60;
-                            value <=> root.interval-secs;
+
+                    HorizontalLayout {
+                        spacing: Metrics.spacing-lg;
+                        FormRow {
+                            label: "检测间隔";
+                            suffix: "秒";
+                            description: "范围 1 ~ 60 秒。";
+                            horizontal-stretch: 1;
+                            NumberBox {
+                                minimum: 1;
+                                maximum: 60;
+                                value <=> root.interval-secs;
+                            }
+                        }
+                        FormRow {
+                            label: "失败阈值";
+                            suffix: "次";
+                            description: "范围 1 ~ 10 次。";
+                            horizontal-stretch: 1;
+                            NumberBox {
+                                minimum: 1;
+                                maximum: 10;
+                                value <=> root.failure-threshold;
+                            }
                         }
                     }
-                    FormRow {
-                        label: "失败阈值";
-                        NumberBox {
-                            minimum: 1;
-                            maximum: 10;
-                            value <=> root.failure-threshold;
-                        }
-                    }
+
+                    Rectangle { height: 1px; background: Theme.border-gray; }
+
                     CheckBox {
                         text: "旁路由恢复后自动重新启用";
                         checked <=> root.auto-reenable;
@@ -945,14 +1527,10 @@ component ConfigPage {
             // 开机自启是 UI 层设置（写 HKCU Run 键，注册表值带 --tray 参数），
             // 不走核心服务配置。
             Card {
-                VerticalLayout {
-                    padding: 14px;
-                    spacing: 10px;
-                    Text {
-                        text: "开机启动";
-                        font-size: Typography.heading-size;
-                        font-weight: 600;
-                        color: Theme.text-primary;
+                CardBody {
+                    SectionTitle {
+                        text: "启动设置";
+                        hint: "控制 Windows 登录后 RouteTool 的启动方式。";
                     }
                     CheckBox {
                         text: "开机自动启动（仅启动托盘图标，不打开窗口）";
@@ -968,23 +1546,38 @@ component ConfigPage {
                 }
             }
 
-            if root.config-error != "": Text {
+            // ---- 保存结果提示（可关闭，避免长期占用视觉焦点；规范第 61 节）----
+            if root.config-error != "": InlineBanner {
                 text: root.config-error;
-                font-size: Typography.caption-size;
-                color: Theme.error;
-                wrap: word-wrap;
+                kind: root.config-error-kind;
+                show-close: true;
+                dismissed => { root.dismiss-config-error(); }
             }
 
+            // ---- 操作区（同一区域只保留一个 Primary；规范第 39/41 节）----
             HorizontalLayout {
-                spacing: 10px;
-                Button {
+                spacing: Metrics.spacing-md;
+                alignment: end;
+
+                Text {
+                    text: root.save-state == "saved" ? "已保存" : "";
+                    font-size: Typography.caption-size;
+                    color: Theme.success;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                ToolButton {
                     text: "恢复默认";
-                    primary: false;
+                    enabled: root.save-state != "saving";
                     clicked => { root.restore-default(); }
                 }
-                Button {
-                    text: "保存";
-                    primary: true;
+                ToolButton {
+                    text: root.save-state == "saving" ? "保存中…" : "保存并应用";
+                    icon-data: root.save-state == "saving" ? Icons.spinner : Icons.save;
+                    accent: true;
+                    // 保存进行中禁止重复触发（规范第 72 节）。
+                    enabled: root.save-state != "saving";
                     clicked => { root.save-config(); }
                 }
             }
@@ -997,6 +1590,13 @@ component ConfigPage {
 //   - 三列固定宽：时间 / 等级徽标 / 内容（13px 日志字号，规范「日志文字」）；
 //   - message 用 vertical-alignment: top，多行时贴顶显示（默认 center 会让
 //     首行垂直方向居中，看起来不跟 time/level 列对齐）。
+// LogRow 自适应高度：把单条日志 message 文本换行后整个行条按内容增高，
+// 避免固定行高遮住 wrap 文本。
+//   - 三列：时间（固定窄列）/ 等级徽标（固定宽）/ 内容（弹性列，可换行）；
+//     列宽按内容类型设计，描述类占据剩余宽度（规范第 55 节）。
+//   - 等级用「浅底徽标 + 语义色文字」，同时保留文字标签，不只靠颜色（规范第 46 节）。
+//   - message 用 vertical-alignment: top，多行时贴顶显示（默认 center 会让
+//     首行垂直方向居中，看起来不跟 time/level 列对齐）。
 component LogRow {
     in property <string> time;
     in property <string> level;
@@ -1004,38 +1604,39 @@ component LogRow {
     in property <int> row-index;
 
     Rectangle {
-        background: Math.mod(row-index, 2) == 0 ? #ffffff : #fafafa;
-        min-height: 26px;
+        background: Math.mod(row-index, 2) == 0 ? #ffffff : Theme.card-gray;
+        min-height: 28px;
         HorizontalLayout {
-            padding-top: 4px;
-            padding-bottom: 4px;
-            padding-left: 6px;
-            padding-right: 6px;
-            spacing: 0px;
+            padding-top: Metrics.spacing-xs;
+            padding-bottom: Metrics.spacing-xs;
+            padding-left: Metrics.spacing-xs;
+            padding-right: Metrics.spacing-xs;
+            spacing: Metrics.spacing-sm;
+
+            // 时间列：固定窄宽度（时间类列固定宽度，规范第 55 节）。
             Rectangle {
-                width: 76px;
-                background: #f3f3f3;
+                width: 68px;
+                background: Theme.bg-gray;
                 border-radius: 3px;
                 Text {
                     text: root.time;
                     font-size: Typography.label-size;
-                    color: Theme.text-tertiary;
+                    color: Theme.text-secondary;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
             }
+
+            // 等级徽标：固定宽度 + 浅底语义色，配文字标签。
             Rectangle {
-                width: 8px;
-            }
-            Rectangle {
-                width: 56px;
-                background: root.level == "ERROR" ? #fde7e3
-                    : (root.level == "WARN" ? #fff3d6
-                    : (root.level == "INFO" ? #e8f4fd : #f3f3f3));
+                width: 52px;
+                background: root.level == "ERROR" ? Theme.error-bg
+                    : (root.level == "WARN" ? Theme.warning-bg
+                    : (root.level == "INFO" ? Theme.info-bg : Theme.bg-gray));
                 border-radius: 3px;
                 Text {
-                    text: root.level;
-                    font-size: Typography.label-size;
+                    text: root.level == "" ? "LOG" : root.level;
+                    font-size: Typography.caption-size;
                     font-weight: 600;
                     color: root.level == "ERROR" ? Theme.error
                         : (root.level == "WARN" ? Theme.warning
@@ -1044,9 +1645,7 @@ component LogRow {
                     vertical-alignment: center;
                 }
             }
-            Rectangle {
-                width: 8px;
-            }
+
             Text {
                 text: root.message;
                 font-size: Typography.label-size;
@@ -1061,35 +1660,32 @@ component LogRow {
 
 component LogsPage {
     in property <[LogEntry]> log-entries;
+    in property <bool> logs-loading: false;
     callback open-logs();
     callback refresh();
 
     VerticalLayout {
         padding: 0px;
-        spacing: 12px;
+        spacing: Metrics.spacing-lg;
 
         HorizontalLayout {
-            spacing: 8px;
-            Text {
-                text: "日志";
-                font-size: Typography.title-size;
-                font-weight: 600;
-                color: Theme.text-primary;
-                vertical-alignment: center;
+            spacing: Metrics.spacing-md;
+            PageHeader {
+                title: "日志";
+                subtitle: "最近的界面与核心服务运行记录，按时间倒序，最多显示 200 条。";
+                horizontal-stretch: 1;
             }
             HorizontalLayout {
                 alignment: end;
-                spacing: 8px;
+                spacing: Metrics.spacing-sm;
                 ToolButton {
                     text: "刷新";
                     icon-data: Icons.refresh;
-                    width: 84px;
                     clicked => { root.refresh(); }
                 }
                 ToolButton {
                     text: "打开日志目录";
                     icon-data: Icons.folder-open;
-                    width: 140px;
                     clicked => { root.open-logs(); }
                 }
             }
@@ -1101,11 +1697,30 @@ component LogsPage {
             VerticalLayout {
                 padding: 0px;
                 spacing: 0px;
-                ScrollView {
+
+                // 空状态 / 加载状态：不留白屏（规范第 47/48 节）。
+                // Slint 不支持 else if，用互斥条件表达三选一。
+                if root.logs-loading: VerticalLayout {
+                    alignment: center;
+                    vertical-stretch: 1;
+                    EmptyState {
+                        title: "正在读取日志…";
+                        hint: "正在从日志目录加载最近的记录。";
+                    }
+                }
+                if !root.logs-loading && root.log-entries.length == 0: VerticalLayout {
+                    alignment: center;
+                    vertical-stretch: 1;
+                    EmptyState {
+                        title: "暂无日志记录";
+                        hint: "这里还没有可显示的日志。点击「刷新」重新读取，或确认核心服务正在运行。";
+                    }
+                }
+                if !root.logs-loading && root.log-entries.length > 0: ScrollView {
                     vertical-stretch: 1;
                     VerticalLayout {
-                        padding: 6px;
-                        padding-right: 12px;
+                        padding: Metrics.spacing-sm;
+                        padding-right: Metrics.spacing-md;
                         spacing: 0px;
                         for entry[idx] in root.log-entries: LogRow {
                             time: entry.time;
@@ -1129,22 +1744,30 @@ component AboutPage {
     // 在剩余空间里垂直居中。
     VerticalLayout {
         padding: 0px;
-        spacing: 16px;
+        spacing: Metrics.spacing-lg;
         vertical-stretch: 1;
 
         HorizontalLayout {
             horizontal-stretch: 1;
-            alignment: end;
-            ToolButton {
-                text: "检查更新";
-                accent: true;
-                width: 96px;
-                clicked => { root.check-update(); }
+            spacing: Metrics.spacing-md;
+            PageHeader {
+                title: "关于";
+                subtitle: "版本信息与项目说明。";
+                horizontal-stretch: 1;
+            }
+            HorizontalLayout {
+                alignment: end;
+                ToolButton {
+                    text: "检查更新";
+                    icon-data: Icons.refresh;
+                    accent: true;
+                    clicked => { root.check-update(); }
+                }
             }
         }
 
         VerticalLayout {
-            spacing: 14px;
+            spacing: Metrics.spacing-lg;
             alignment: center;
             horizontal-stretch: 1;
             vertical-stretch: 1;
@@ -1208,10 +1831,12 @@ export component AppWindow inherits Window {
     // std-widgets 的默认字号统一 14px（正文）。
     default-font-family: "Segoe UI Variable";
     default-font-size: Typography.body-size;
-    preferred-width: 720px;
-    preferred-height: 520px;
-    min-width: 660px;
-    min-height: 460px;
+    // 窗口尺寸：侧栏按规范加宽到 200px 后，同步放宽默认宽度，
+    // 保证右侧表单（Label→Input→Description）仍有舒适阅读宽度（规范第 10/11 节）。
+    preferred-width: 880px;
+    preferred-height: 600px;
+    min-width: 720px;
+    min-height: 520px;
 
     in property <string> status-text: "未连接到核心服务";
     in property <bool> is-enabled: false;
@@ -1239,9 +1864,28 @@ export component AppWindow inherits Window {
     in-out property <bool> auto-reenable: false;
     in-out property <bool> notifications: true;
     in-out property <bool> launch-at-startup: false;
+
+    // 页面级汇总提示（可关闭的内联提示条，规范第 59/60 节）。
     in property <string> config-error: "";
+    // kind: 0=成功 1=注意 2=失败 3=信息
+    in property <int> config-error-kind: 2;
+    // 保存流程状态："" 空闲 / "saving" 保存中 / "saved" 已保存（规范第 72/73 节）
+    in property <string> save-state: "";
+
+    // 字段级错误（规范第 23/34 节）：空字符串表示该字段无错误。
+    // 出错的输入框描边转错误色并在字段下方给出具体原因，
+    // 而不是把所有校验失败汇总成页面底部一行红字。
+    in property <string> err-bypass-ip: "";
+    in property <string> err-static-ip: "";
+    in property <string> err-mask: "";
+    in property <string> err-dns: "";
+
+    // 服务连接告警：核心服务不可用时明确告知，而不是只靠侧栏一个小圆点。
+    in property <bool> service-lost: false;
 
     in property <[LogEntry]> log-entries: [];
+    // 日志读取状态（规范第 47/48 节）：空状态 / 加载中要有明确表述。
+    in property <bool> logs-loading: false;
     in-out property <int> current-page: 0;
 
     callback toggle-bypass();
@@ -1252,42 +1896,49 @@ export component AppWindow inherits Window {
     callback check-update();
     callback refresh-logs();
     callback launch-at-startup-changed(bool);
+    callback dismiss-config-error();
     // 主动触发「拉取最新网卡列表 + 刷新首页下方卡片」
     callback refresh-adapters();
 
     property <color> status-color: root.is-fallback ? Theme.error
         : (root.is-enabled ? Theme.success : Theme.text-secondary);
 
+    // 状态语义：交给 StatusBadge 统一表达（图标 + 文案 + 颜色）。
+    property <int> status-kind: root.is-fallback ? 2
+        : (root.is-enabled ? 0 : 3);
+
     HorizontalLayout {
         Rectangle {
-            width: 140px;
+            // 侧栏宽度 200px（规范第 13 节 200~220px）。
+            width: 200px;
             background: #ffffff;
 
             Rectangle {
-                x: 139px;
+                x: parent.width - 1px;
                 width: 1px;
                 height: 100%;
                 background: Theme.border-gray;
             }
 
             VerticalLayout {
-                padding: 14px;
-                spacing: 6px;
+                padding: Metrics.spacing-md;
+                // 菜单项之间 2~4px（规范第 13 节）。
+                spacing: Metrics.spacing-xs;
 
                 HorizontalLayout {
-                    spacing: 8px;
+                    spacing: Metrics.spacing-sm;
                     alignment: start;
                     Image {
                         source: @image-url("../../../assets/app.png");
-                        width: 28px;
-                        height: 28px;
+                        width: 32px;
+                        height: 32px;
                     }
                     VerticalLayout {
                         spacing: 2px;
                         alignment: center;
                         Text {
                             text: "RouteTool";
-                            font-size: Typography.label-size;
+                            font-size: Typography.body-size;
                             font-weight: 600;
                             color: Theme.text-primary;
                         }
@@ -1299,7 +1950,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Rectangle { height: 12px; }
+                Rectangle { height: Metrics.spacing-md; }
 
                 SidebarItem {
                     icon-data: Icons.home;
@@ -1334,23 +1985,16 @@ export component AppWindow inherits Window {
 
                 VerticalLayout {
                     alignment: end;
-                    spacing: 4px;
+                    spacing: Metrics.spacing-xs;
                     vertical-stretch: 0;
-                    HorizontalLayout {
-                        spacing: 4px;
-                        alignment: start;
-                        Rectangle {
-                            width: 6px;
-                            height: 6px;
-                            border-radius: 3px;
-                            background: root.service-status-text == "服务运行中" ? Theme.success : Theme.error;
-                        }
-                        Text {
-                            text: root.service-status-text;
-                            font-size: Typography.caption-size;
-                            color: Theme.text-secondary;
-                        }
+
+                    // 连接状态：图标 + 文案共同表达，不只是一个小圆点（规范第 46 节）。
+                    StatusBadge {
+                        compact: true;
+                        text: root.service-status-text;
+                        kind: root.service-status-text == "服务运行中" ? 0 : 2;
                     }
+
                     Text {
                         text: root.version-text;
                         font-size: Typography.caption-size;
@@ -1363,12 +2007,13 @@ export component AppWindow inherits Window {
         Rectangle {
             background: Theme.bg-gray;
             HorizontalLayout {
-                padding: 14px;
+                // 内容区 padding（规范第 10 节）。
+                padding: Metrics.content-padding;
                 spacing: 0px;
 
                 if root.current-page == 0: HomePage {
                     status-text: root.status-text;
-                    status-color: root.status-color;
+                    status-kind: root.status-kind;
                     is-enabled: root.is-enabled;
                     is-fallback: root.is-fallback;
                     latency-ms: root.latency-ms;
@@ -1380,6 +2025,7 @@ export component AppWindow inherits Window {
                     adapter-gateway: root.selected-adapter-gateway;
                     adapter-dns: root.selected-adapter-dns;
                     adapter-name: root.selected-adapter-name;
+                    service-lost: root.service-lost;
                     toggle => { root.toggle-bypass(); }
                     switch-mode => { root.current-page = 1; }
                 }
@@ -1398,14 +2044,22 @@ export component AppWindow inherits Window {
                     notifications <=> root.notifications;
                     launch-at-startup <=> root.launch-at-startup;
                     config-error: root.config-error;
+                    config-error-kind: root.config-error-kind;
+                    save-state: root.save-state;
+                    err-bypass-ip: root.err-bypass-ip;
+                    err-static-ip: root.err-static-ip;
+                    err-mask: root.err-mask;
+                    err-dns: root.err-dns;
                     adapter-changed(index) => { root.adapter-changed(index); }
                     save-config => { root.save-config(); }
                     restore-default => { root.restore-default(); }
                     launch-at-startup-changed(enabled) => { root.launch-at-startup-changed(enabled); }
+                    dismiss-config-error => { root.dismiss-config-error(); }
                 }
 
                 if root.current-page == 2: LogsPage {
                     log-entries: root.log-entries;
+                    logs-loading: root.logs-loading;
                     open-logs => { root.open-logs(); }
                     refresh => { root.refresh-logs(); }
                 }

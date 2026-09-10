@@ -39,6 +39,91 @@ const CORE_LOG_PREFIX_NEW: &str = "route-tool-core";
 /// 核心日志滚动文件前缀（旧名）。
 const CORE_LOG_PREFIX_OLD: &str = "bypass-core";
 
+/// 字段级校验错误（规范第 23/34 节：错误必须能定位到具体字段）。
+///
+/// 每个字段独立记录错误文案，空字符串表示该字段通过校验。
+/// 全部为空即整表通过。与「页面级提示」区分：字段级错误渲染在输入框下方，
+/// 页面级提示（保存失败、服务异常等）走底部提示条。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct FieldErrors {
+    bypass_ip: String,
+    static_ip: String,
+    mask: String,
+    dns: String,
+}
+
+impl FieldErrors {
+    fn is_clean(&self) -> bool {
+        self.bypass_ip.is_empty()
+            && self.static_ip.is_empty()
+            && self.mask.is_empty()
+            && self.dns.is_empty()
+    }
+
+    /// 汇总为一条可读的提示（用于底部提示条与日志）。
+    fn summary(&self) -> String {
+        let mut items: Vec<String> = Vec::new();
+        if !self.bypass_ip.is_empty() {
+            items.push(format!("旁路由 IP：{}", self.bypass_ip));
+        }
+        if !self.static_ip.is_empty() {
+            items.push(format!("网卡静态 IP：{}", self.static_ip));
+        }
+        if !self.mask.is_empty() {
+            items.push(format!("子网掩码：{}", self.mask));
+        }
+        if !self.dns.is_empty() {
+            items.push(format!("DNS：{}", self.dns));
+        }
+        if items.is_empty() {
+            String::new()
+        } else {
+            format!("请修正以下 {} 处问题：{}", items.len(), items.join("；"))
+        }
+    }
+}
+
+/// 把字段级错误推送到 UI（空字符串清除对应字段的错误态）。
+fn apply_field_errors(app: &AppWindow, errs: &FieldErrors) {
+    app.set_err_bypass_ip(errs.bypass_ip.clone().into());
+    app.set_err_static_ip(errs.static_ip.clone().into());
+    app.set_err_mask(errs.mask.clone().into());
+    app.set_err_dns(errs.dns.clone().into());
+}
+
+/// 校验 UI 各输入字段，返回所有字段错误（不短路，一次性把问题都指出）。
+///
+/// 直改模式下才有意义的字段（静态 IP / 掩码 / DNS），在路由叠加模式下
+/// 不参与校验——避免用户看到与当前模式无关的红字。
+fn validate_ui_fields(app: &AppWindow) -> FieldErrors {
+    let mut errs = FieldErrors::default();
+
+    let bypass_raw = app.get_bypass_ip_text().trim().to_string();
+    if bypass_raw.is_empty() {
+        errs.bypass_ip = "请填写旁路由 IP".to_string();
+    } else if bypass_raw.parse::<std::net::IpAddr>().is_err() {
+        errs.bypass_ip = "地址格式无效，应形如 192.168.1.1".to_string();
+    }
+
+    if app.get_mode_index() == 1 {
+        let static_raw = app.get_static_ip_text().trim().to_string();
+        if !static_raw.is_empty() && static_raw.parse::<std::net::Ipv4Addr>().is_err() {
+            errs.static_ip = "地址格式无效，应形如 192.168.2.100".to_string();
+        }
+
+        let mask_raw = app.get_mask_text().trim().to_string();
+        if !mask_raw.is_empty() && mask_raw.parse::<std::net::Ipv4Addr>().is_err() {
+            errs.mask = "掩码格式无效，应形如 255.255.255.0".to_string();
+        }
+
+        if let Err(e) = parse_dns_list(&app.get_dns_text()) {
+            errs.dns = e;
+        }
+    }
+
+    errs
+}
+
 /// 解析 DNS 输入（逗号/分号/空白分隔），空输入返回 None。
 fn parse_dns_list(text: &str) -> Result<Option<Vec<std::net::IpAddr>>, String> {
     let items: Vec<&str> = text
@@ -51,18 +136,27 @@ fn parse_dns_list(text: &str) -> Result<Option<Vec<std::net::IpAddr>>, String> {
     }
     let mut out = Vec::new();
     for it in items {
-        let ip: std::net::IpAddr = it.parse().map_err(|_| format!("DNS 地址无效: {it}"))?;
+        let ip: std::net::IpAddr = it
+            .parse()
+            .map_err(|_| format!("“{it}” 不是有效的 DNS 地址"))?;
         out.push(ip);
     }
     Ok(Some(out))
 }
 
 /// 从 UI 控件读取当前配置，构造 AppConfig（不含 adapter_id，调用方补齐）。
-fn build_config_from_ui(app: &AppWindow) -> Result<AppConfig, String> {
-    let ip: std::net::IpAddr = app
-        .get_bypass_ip_text()
-        .parse()
-        .map_err(|_| "旁路由 IP 无效".to_string())?;
+///
+/// 调用前由 `validate_ui_fields` 保证输入合法；这里仍做一次解析，
+/// 失败时给出字段名以便定位（正常流程不会走到）。
+fn build_config_from_ui(app: &AppWindow) -> Result<AppConfig, FieldErrors> {
+    let ip: std::net::IpAddr =
+        app.get_bypass_ip_text()
+            .trim()
+            .parse()
+            .map_err(|_| FieldErrors {
+                bypass_ip: "地址格式无效，应形如 192.168.1.1".to_string(),
+                ..Default::default()
+            })?;
 
     let static_ip_text = app.get_static_ip_text().trim().to_string();
     let static_ip = if static_ip_text.is_empty() {
@@ -71,7 +165,10 @@ fn build_config_from_ui(app: &AppWindow) -> Result<AppConfig, String> {
         Some(
             static_ip_text
                 .parse::<std::net::Ipv4Addr>()
-                .map_err(|_| "网卡静态 IP 无效（如 192.168.2.100）".to_string())?,
+                .map_err(|_| FieldErrors {
+                    static_ip: "地址格式无效，应形如 192.168.2.100".to_string(),
+                    ..Default::default()
+                })?,
         )
     };
 
@@ -79,14 +176,16 @@ fn build_config_from_ui(app: &AppWindow) -> Result<AppConfig, String> {
     let mask = if mask_text.is_empty() {
         Some(DEFAULT_MASK.parse().unwrap())
     } else {
-        Some(
-            mask_text
-                .parse()
-                .map_err(|_| "子网掩码无效（如 255.255.255.0）".to_string())?,
-        )
+        Some(mask_text.parse().map_err(|_| FieldErrors {
+            mask: "掩码格式无效，应形如 255.255.255.0".to_string(),
+            ..Default::default()
+        })?)
     };
 
-    let dns = parse_dns_list(&app.get_dns_text())?;
+    let dns = parse_dns_list(&app.get_dns_text()).map_err(|e| FieldErrors {
+        dns: e,
+        ..Default::default()
+    })?;
 
     let mut cfg = AppConfig {
         bypass_ip: ip,
@@ -537,7 +636,13 @@ fn main() -> anyhow::Result<()> {
                             let app_weak = app_weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(app) = app_weak.upgrade() {
-                                    app.set_config_error(format!("保存网卡选择失败: {e}").into());
+                                    app.set_config_error(
+                                        format!(
+                                            "保存网卡选择失败：{e}。请确认核心服务正常后重新选择。"
+                                        )
+                                        .into(),
+                                    );
+                                    app.set_config_error_kind(2);
                                 }
                             });
                         } else {
@@ -566,18 +671,35 @@ fn main() -> anyhow::Result<()> {
             let enable = !is_enabled_now(&app_weak);
             let rt = rt.clone();
 
+            // 启用前先做字段级校验：出错时把错误定位到具体输入框，
+            // 并在底部提示条给出汇总，而不是只显示一句笼统的失败。
             let mut cfg = match app_weak.upgrade() {
-                Some(app) => match build_config_from_ui(&app) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(a) = app_weak.upgrade() {
-                                a.set_config_error(e.into());
-                            }
-                        });
+                Some(app) => {
+                    let errs = validate_ui_fields(&app);
+                    if !errs.is_clean() {
+                        let summary = errs.summary();
+                        apply_field_errors(&app, &errs);
+                        app.set_config_error(summary.into());
+                        app.set_config_error_kind(2);
+                        app.set_current_page(1);
                         return;
                     }
-                },
+                    apply_field_errors(&app, &FieldErrors::default());
+                    match build_config_from_ui(&app) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let summary = e.summary();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(a) = app_weak.upgrade() {
+                                    apply_field_errors(&a, &e);
+                                    a.set_config_error(summary.into());
+                                    a.set_config_error_kind(2);
+                                }
+                            });
+                            return;
+                        }
+                    }
+                }
                 None => return,
             };
 
@@ -614,7 +736,10 @@ fn main() -> anyhow::Result<()> {
                     let app_weak_err = app_weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(app) = app_weak_err.upgrade() {
-                            app.set_config_error(e.into());
+                            app.set_config_error(
+                                format!("切换状态失败：{e}。请确认核心服务正常后重试。").into(),
+                            );
+                            app.set_config_error_kind(2);
                         }
                     });
                 }
@@ -655,13 +780,34 @@ fn main() -> anyhow::Result<()> {
                 Some(a) => a,
                 None => return,
             };
+            // 防止重复触发：保存进行中忽略再次点击（规范第 72 节）。
+            if app.get_save_state().as_str() == "saving" {
+                return;
+            }
+
+            // 字段级校验：出错时定位到字段并给汇总提示，不进入保存流程。
+            let errs = validate_ui_fields(&app);
+            if !errs.is_clean() {
+                let summary = errs.summary();
+                apply_field_errors(&app, &errs);
+                app.set_config_error(summary.into());
+                app.set_config_error_kind(2);
+                return;
+            }
+            apply_field_errors(&app, &FieldErrors::default());
+
             let mut cfg = match build_config_from_ui(&app) {
                 Ok(c) => c,
                 Err(e) => {
-                    app.set_config_error(e.into());
+                    let summary = e.summary();
+                    apply_field_errors(&app, &e);
+                    app.set_config_error(summary.into());
+                    app.set_config_error_kind(2);
                     return;
                 }
             };
+            app.set_save_state("saving".into());
+            app.set_config_error("".into());
             drop(app);
 
             let rt = rt.clone();
@@ -676,21 +822,50 @@ fn main() -> anyhow::Result<()> {
                     Ok(()) => {
                         st.config = cfg;
                         drop(st);
+                        // 每次闭包要独占 app_weak，先克隆一份给「已保存」提示用。
+                        let app_weak_saved = app_weak.clone();
                         let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(app) = app_weak.upgrade() {
-                                app.set_config_error("".into());
+                            if let Some(app) = app_weak_saved.upgrade() {
+                                app.set_save_state("saved".into());
+                                app.set_config_error("配置已保存并应用。".into());
+                                app.set_config_error_kind(0);
+                            }
+                        });
+                        // 「已保存」提示 2 秒后自动消失，避免长期占用视觉焦点。
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        let app_weak_reset = app_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(app) = app_weak_reset.upgrade() {
+                                if app.get_save_state().as_str() == "saved" {
+                                    app.set_save_state("".into());
+                                }
                             }
                         });
                     }
                     Err(e) => {
+                        let app_weak_err = app_weak.clone();
                         let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(app) = app_weak.upgrade() {
-                                app.set_config_error(format!("保存失败: {e}").into());
+                            if let Some(app) = app_weak_err.upgrade() {
+                                app.set_save_state("".into());
+                                app.set_config_error(
+                                    format!("保存失败：{e}。请确认核心服务正常后重试。").into(),
+                                );
+                                app.set_config_error_kind(2);
                             }
                         });
                     }
                 }
             });
+        });
+    }
+
+    // ---- UI 回调：关闭底部提示条 ----
+    {
+        let app_weak = app.as_weak();
+        app.on_dismiss_config_error(move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_config_error("".into());
+            }
         });
     }
 
@@ -719,14 +894,19 @@ fn main() -> anyhow::Result<()> {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(app) = app_weak.upgrade() {
                                 apply_config_to_ui(&app, &cfg);
-                                app.set_config_error("已恢复默认配置".into());
+                                apply_field_errors(&app, &FieldErrors::default());
+                                app.set_config_error("已恢复默认配置。".into());
+                                app.set_config_error_kind(3);
                             }
                         });
                     }
                     Err(e) => {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(app) = app_weak.upgrade() {
-                                app.set_config_error(format!("恢复默认失败: {e}").into());
+                                app.set_config_error(
+                                    format!("恢复默认失败：{e}。请确认核心服务正常后重试。").into(),
+                                );
+                                app.set_config_error_kind(2);
                             }
                         });
                     }
@@ -744,7 +924,11 @@ fn main() -> anyhow::Result<()> {
                 let app_weak = app_weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = app_weak.upgrade() {
-                        app.set_config_error(format!("设置开机自启失败: {e}").into());
+                        app.set_config_error(
+                            format!("设置开机自启失败：{e}。可尝试以管理员身份重新运行本程序。")
+                                .into(),
+                        );
+                        app.set_config_error_kind(2);
                     }
                 });
             }
@@ -758,16 +942,24 @@ fn main() -> anyhow::Result<()> {
     });
 
     // ---- UI 回调：刷新日志 ----
+    // 先切到「正在读取日志…」（规范第 48 节：明确告诉用户在做什么），
+    // 再在后台线程读文件，避免在 UI 线程同步做文件 IO 造成卡顿。
     {
         let app_weak = app.as_weak();
         app.on_refresh_logs(move || {
-            let entries = read_logs();
             let app_weak = app_weak.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                let model = VecModel::from(entries);
-                if let Some(app) = app_weak.upgrade() {
-                    app.set_log_entries(ModelRc::from(Rc::new(model)));
-                }
+            if let Some(app) = app_weak.upgrade() {
+                app.set_logs_loading(true);
+            }
+            std::thread::spawn(move || {
+                let entries = read_logs();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let model = VecModel::from(entries);
+                    if let Some(app) = app_weak.upgrade() {
+                        app.set_log_entries(ModelRc::from(Rc::new(model)));
+                        app.set_logs_loading(false);
+                    }
+                });
             });
         });
     }
@@ -807,17 +999,21 @@ fn main() -> anyhow::Result<()> {
                     };
 
                     // 同步服务指示文字：与 IPC 客户端存活状态对齐。
+                    // 断开时同时把 service-lost 置位，由首页给出明确告警条
+                    //（规范第 49 节：说清发生了什么，而不是只亮一个小红点）。
                     {
                         let st = state.lock().await;
-                        let txt = if st.client.is_some() {
+                        let connected = st.client.is_some();
+                        let txt = if connected {
                             "服务运行中"
                         } else {
-                            "服务断开"
+                            "服务已断开"
                         };
                         let app_weak2 = app_weak.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(app) = app_weak2.upgrade() {
                                 app.set_service_status_text(txt.into());
+                                app.set_service_lost(!connected);
                             }
                         });
                     }
@@ -1013,4 +1209,61 @@ fn main() -> anyhow::Result<()> {
 
 fn is_enabled_now(app: &slint::Weak<AppWindow>) -> bool {
     app.upgrade().map(|a| a.get_is_enabled()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dns_list_accepts_common_separators() {
+        let parsed = parse_dns_list("192.168.1.1, 223.5.5.5；8.8.8.8")
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].to_string(), "192.168.1.1");
+        assert_eq!(parsed[2].to_string(), "8.8.8.8");
+    }
+
+    #[test]
+    fn dns_list_empty_means_none() {
+        assert!(parse_dns_list("   ").unwrap().is_none());
+        assert!(parse_dns_list("").unwrap().is_none());
+    }
+
+    #[test]
+    fn dns_list_error_names_the_offending_entry() {
+        // 错误文案必须包含「出错的原文」，否则用户无从定位是哪个地址写错了。
+        let err = parse_dns_list("192.168.1.1, not-an-ip").unwrap_err();
+        assert!(err.contains("not-an-ip"), "错误文案应包含原文: {err}");
+    }
+
+    #[test]
+    fn field_errors_are_clean_only_when_all_empty() {
+        assert!(FieldErrors::default().is_clean());
+
+        let errs = FieldErrors {
+            mask: "掩码格式无效".to_string(),
+            ..Default::default()
+        };
+        assert!(!errs.is_clean());
+    }
+
+    #[test]
+    fn field_errors_summary_counts_and_names_fields() {
+        let errs = FieldErrors {
+            bypass_ip: "请填写旁路由 IP".to_string(),
+            dns: "“x” 不是有效的 DNS 地址".to_string(),
+            ..Default::default()
+        };
+        let summary = errs.summary();
+        assert!(summary.contains("2 处"), "应统计问题数量: {summary}");
+        assert!(summary.contains("旁路由 IP"), "应点名字段: {summary}");
+        assert!(summary.contains("DNS"), "应点名字段: {summary}");
+    }
+
+    #[test]
+    fn field_errors_summary_is_empty_when_clean() {
+        assert_eq!(FieldErrors::default().summary(), "");
+    }
 }
