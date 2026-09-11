@@ -113,7 +113,9 @@ fn validate_ui_fields(app: &AppWindow) -> FieldErrors {
         errs.bypass_ip = "地址格式无效，应形如 192.168.1.1".to_string();
     }
 
-    if app.get_mode_index() == 1 {
+    // 用「配置页当前选中」的草稿模式判断：用户刚把卡片切到直改、还没保存时，
+    // 也应即时校验直改专有字段。
+    if app.get_draft_mode_index() == 1 {
         let static_raw = app.get_static_ip_text().trim().to_string();
         if !static_raw.is_empty() && static_raw.parse::<std::net::Ipv4Addr>().is_err() {
             errs.static_ip = "地址格式无效，应形如 192.168.2.100".to_string();
@@ -197,7 +199,8 @@ fn build_config_from_ui(app: &AppWindow) -> Result<AppConfig, FieldErrors> {
 
     let mut cfg = AppConfig {
         bypass_ip: ip,
-        switch_mode: if app.get_mode_index() == 1 {
+        // 保存的是配置页当前选中的（草稿）模式，而非上次生效的模式。
+        switch_mode: if app.get_draft_mode_index() == 1 {
             SwitchMode::AdapterReconfig
         } else {
             SwitchMode::RouteOverlay
@@ -329,10 +332,14 @@ async fn refresh_adapters(state: Arc<Mutex<UiState>>, app_weak: slint::Weak<AppW
 /// 把配置同步到 UI 控件（首次连接与重连共用）。
 fn apply_config_to_ui(app: &AppWindow, cfg: &AppConfig) {
     app.set_bypass_ip_text(cfg.bypass_ip.to_string().into());
-    app.set_mode_index(match cfg.switch_mode {
+    let mode_index = match cfg.switch_mode {
         SwitchMode::RouteOverlay => 0,
         SwitchMode::AdapterReconfig => 1,
-    });
+    };
+    app.set_mode_index(mode_index);
+    // 草稿同步：配置页里「当前选中」与已生效模式保持一致，
+    // 避免上次「切了但没保存」的选择残留在界面上。
+    app.set_draft_mode_index(mode_index);
     app.set_interval_secs(cfg.health_check_interval_secs as i32);
     app.set_failure_threshold(cfg.failure_threshold as i32);
     app.set_auto_reenable(cfg.auto_reenable_after_recovery);
@@ -858,6 +865,12 @@ fn main() -> anyhow::Result<()> {
                 };
                 match result {
                     Ok(()) => {
+                        // 保存成功 = 草稿模式正式生效：提交给 AppWindow.mode-index
+                        // （首页「当前模式」卡片据此显示），并让草稿与生效保持一致。
+                        let saved_mode_index = match cfg.switch_mode {
+                            SwitchMode::RouteOverlay => 0,
+                            SwitchMode::AdapterReconfig => 1,
+                        };
                         st.config = cfg;
                         drop(st);
                         // 每次闭包要独占 app_weak，先克隆一份给「已保存」提示用。
@@ -865,6 +878,8 @@ fn main() -> anyhow::Result<()> {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(app) = app_weak_saved.upgrade() {
                                 app.set_save_state("saved".into());
+                                app.set_mode_index(saved_mode_index);
+                                app.set_draft_mode_index(saved_mode_index);
                                 app.set_config_error("配置已保存并应用。".into());
                                 app.set_config_error_kind(0);
                             }

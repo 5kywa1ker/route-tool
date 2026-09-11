@@ -87,6 +87,16 @@ export global Typography {
     out property <float> heading-num: 16;
     out property <float> body-num: 14;
     out property <float> caption-num: 12;
+
+    // 中西文混排整行统一用的字体族（Windows 上即微软雅黑 UI，中西文都覆盖）。
+    //
+    // 为什么需要它：Window 的 default-font-family 是 Segoe UI Variable —— 这个字体
+    // 没有汉字，中文必须 fallback 到系统默认中文字体。于是同一行里若拆成两个 Text
+    // （比如「字段名」中文 + 「值」英文/数字），两个字体族的行盒 ascent/descent 不同，
+    // 各自在行高里居中之后基线就错开 2~3px，看起来像「没在一条水平线上」。
+    // 把整行的字体族显式统一（中西文字形都来自同一个字体，度量天然一致），
+    // 「居中」才等价于「基线对齐」。
+    out property <string> family-mixed: "Microsoft YaHei UI";
 }
 
 // 浮层（Tooltip / 悬浮详情）样式 Token。
@@ -390,24 +400,141 @@ component InlineBanner {
             }
             if root.show-close: VerticalLayout {
                 alignment: center;
-                close-ta := TouchArea {
+                // 同 Toast：触区与图标叠在同一个 16px 格子里，别让布局把
+                // 16 的触区 + 12 的图标竖排成 28px（那会让 × 掉到中线下方 8px）。
+                Rectangle {
                     width: 16px;
                     height: 16px;
-                    clicked => { root.dismissed(); }
-                }
-                Path {
-                    width: 12px;
-                    height: 12px;
-                    fill: close-ta.has-hover ? Theme.text-primary : Theme.text-tertiary;
-                    viewbox-x: 0;
-                    viewbox-y: 0;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
-                    commands: Icons.dismiss;
+                    close-ta := TouchArea {
+                        clicked => { root.dismissed(); }
+                    }
+                    Path {
+                        x: 2px;
+                        y: 2px;
+                        width: 12px;
+                        height: 12px;
+                        fill: close-ta.has-hover ? Theme.text-primary : Theme.text-tertiary;
+                        viewbox-x: 0;
+                        viewbox-y: 0;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.dismiss;
+                    }
                 }
             }
         }
     }
+}
+
+// Toast 提示（规范第 59/61 节）：操作结果的轻量反馈。
+//
+// 与 InlineBanner 的区别是形态而非语义——两者共用同一套 kind 语义色：
+//   InlineBanner 占据内容流（会被滚动带走、把下面的卡片顶下去）；
+//   Toast 悬浮在内容区右上角、自动消失、不干扰阅读位置。
+// 页面级「操作已提交/失败」这类反馈用 Toast；需要常驻的诊断类信息仍用 InlineBanner。
+//
+// 尺寸推导放在子元素声明之后（同 InlineTooltip 的做法，避免 layoutinfo 成环）：
+//   根 width  ← 文本固有宽度（上限 ToastStyle.max-width）；
+//   根 height ← content.preferred-height（在给定宽度下算出的换行高度）。
+// 宽度全部自上而下确定，换行高度不参与宽度计算，所以不会循环。
+//
+// 水平开销 = padding 2×12 + 图标 16 + 图标/文字间距 8 + 文字/关闭间距 8 + 关闭 16 = 72px。
+export global ToastStyle {
+    out property <length> max-width: 360px;
+    out property <length> inset: 20px;
+    out property <duration> auto-dismiss: 4s;
+    // 失败要留够阅读时间（规范第 60 节：错误必须给出下一步）。
+    out property <duration> auto-dismiss-error: 8s;
+}
+
+component Toast {
+    in property <string> text;
+    // kind: 0=成功 1=注意 2=失败 3=信息
+    in property <int> kind: 0;
+    callback dismissed();
+
+    property <color> tone: root.kind == 0 ? Theme.success
+        : (root.kind == 1 ? Theme.warning
+        : (root.kind == 2 ? Theme.error : Theme.accent-blue));
+    property <color> fill: root.kind == 0 ? Theme.success-bg
+        : (root.kind == 1 ? Theme.warning-bg
+        : (root.kind == 2 ? Theme.error-bg : Theme.info-bg));
+    property <string> icon: root.kind == 0 ? Icons.status-ok
+        : (root.kind == 1 ? Icons.status-warn
+        : (root.kind == 2 ? Icons.status-error : Icons.about));
+
+    Rectangle {
+        background: root.fill;
+        border-radius: Metrics.radius-lg;
+        border-width: 1px;
+        border-color: root.tone;
+        // 浮层必须比内容高一层：投影 + 描边共同表达（不单靠颜色，规范第 46 节）。
+        drop-shadow-offset-x: 0;
+        drop-shadow-offset-y: 4px;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #26000000;
+
+        content := HorizontalLayout {
+            width: parent.width;
+            height: parent.height;
+            padding: Metrics.spacing-md;
+            spacing: Metrics.spacing-sm;
+            alignment: start;
+
+            VerticalLayout {
+                alignment: center;
+                Path {
+                    width: 16px;
+                    height: 16px;
+                    fill: root.tone;
+                    viewbox-x: 0;
+                    viewbox-y: 0;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: root.icon;
+                }
+            }
+
+            text-el := Text {
+                text: root.text;
+                font-size: Typography.label-size;
+                color: Theme.text-primary;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            VerticalLayout {
+                alignment: center;
+                // 关闭按钮必须是「一个 16px 的格子」：触区与图标叠在同一格里。
+                // 不能把 TouchArea(16) 和 Path(12) 直接放进 VerticalLayout ——
+                // 布局会把两者竖着排成 16+12=28px，格子变高后图标被挤到中线以下
+                // 8px（表现为「× 不居中」），而且 28px 还会顶高整个 Toast。
+                Rectangle {
+                    width: 16px;
+                    height: 16px;
+                    close-ta := TouchArea {
+                        clicked => { root.dismissed(); }
+                    }
+                    Path {
+                        x: 2px;
+                        y: 2px;
+                        width: 12px;
+                        height: 12px;
+                        fill: close-ta.has-hover ? Theme.text-primary : Theme.text-tertiary;
+                        viewbox-x: 0;
+                        viewbox-y: 0;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.dismiss;
+                    }
+                }
+            }
+        }
+    }
+
+    width: min(ToastStyle.max-width, text-el.preferred-width + 72px);
+    height: content.preferred-height;
 }
 
 // 空状态（规范第 47/53 节）：不能只留空白容器。
@@ -890,10 +1017,14 @@ component InlineTooltip {
     height: TooltipStyle.arrow-size + content.preferred-height;
 }
 
-// 首页卡片「key 左 / value 右」行（规范第 43/44 节 Key-Value 展示）。
-//   - key 固有宽度靠左；value 区 horizontal-stretch: 1 吃掉剩余宽度并右对齐
-//     （HorizontalLayout 里 Text 默认 stretch=1，key 必须显式置 0，
-//     否则 key 的框撑满整行把 value 顶到行尾——v0.1.17 二次踩坑）。
+// 首页卡片「字段名：值」行（规范第 43/44 节 Key-Value 展示）。
+//   - 字段名（含全角冒号）按固有宽度靠左，值紧跟在冒号后面左对齐；
+//     value 区仍 horizontal-stretch: 1 吃掉剩余宽度 —— 一是让「点击复制」热区够大，
+//     二是让多个 KeyValueRow 并排成两列时能被等分（见组件根 Rectangle 的三项布局参数）。
+//   - key 必须显式 horizontal-stretch: 0，否则 key 的框撑满整行把 value 顶到行尾
+//     （v0.1.17 二次踩坑）。
+//   - key 与 value 必须同高：key 被 HorizontalLayout 拉到整行高后居中，value 的
+//     Text 也要 height: 100% 撑满它所在的 20px 盒子，否则两者中心差 ~1px（见下方注释）。
 //   - 只读数据不用 Input 模拟（规范第 42 节），保持 Label + Value 结构。
 //   - value 超宽时省略号截断，鼠标悬浮弹出完整内容浮层（Element UI 风格
 //     黑底白字、跟随鼠标），点击行复制完整值，保证「视觉可截断，
@@ -912,54 +1043,87 @@ component KeyValueRow {
     property <string> display-value: root.value == "" ? root.empty-text : root.value;
     property <bool> is-empty: root.value == "";
 
-    HorizontalLayout {
-        spacing: Metrics.spacing-sm;
+    // 根必须是 Rectangle，不能用裸 HorizontalLayout：
+    //   1) 布局元素为根的组件，preferred-width/height 由自身 layoutinfo 推出，
+    //      而 layoutinfo 又依赖被分配的宽高，会形成循环依赖（同 SectionTitle 注释）；
+    //   2) 布局元素根上的 min/preferred-width 是布局算出来的「输出」，实例侧无法
+    //      把它覆盖成「输入」；而首页要把多个 KeyValueRow 并排成等宽两列，
+    //      必须能从实例侧指定这两项。
+    // min-width / preferred-width 置 0 + horizontal-stretch: 1 —— 与 ModeCard 同一
+    // 策略：只设 min-width 时横向布局按「preferred - min」比例分配剩余空间，
+    // 「网卡」与「旁路由 IP」这类长短不一的键会让两列不等宽。
+    min-width: 0px;
+    preferred-width: 0px;
+    horizontal-stretch: 1;
+
+    Rectangle {
         horizontal-stretch: 1;
 
-        Text {
-            text: root.key;
-            font-size: Typography.label-size;
-            color: Theme.text-secondary;
-            vertical-alignment: center;
-            horizontal-stretch: 0;
-        }
-
-        Rectangle {
-            height: 20px;
+        HorizontalLayout {
+            // 冒号直接跟在字段名后面，不再额外留间距（冒号是标签的一部分）。
+            spacing: 0px;
             horizontal-stretch: 1;
 
-            // 悬浮 → 显示全局单例浮层（内容区末尾统一渲染，见 TooltipState）；
-            // 点击 → 复制完整值（反馈：值文本短暂变为「已复制」）。
-            // changed/moved 里把鼠标窗口坐标写入 TooltipState：
-            //   TouchArea 的 mouse-x/y 是相对自身的偏移，必须加上
-            //   absolute-position 才是窗口坐标（Slint 官方 listview 同款换算）。
-            hover := TouchArea {
-                changed has-hover => {
-                    TooltipState.text = root.value;
-                    TooltipState.visible = self.has-hover && !root.is-empty;
-                    TooltipState.mouse-wx = self.absolute-position.x + self.mouse-x;
-                    TooltipState.mouse-wy = self.absolute-position.y + self.mouse-y;
-                }
-                moved => {
-                    TooltipState.mouse-wx = self.absolute-position.x + self.mouse-x;
-                    TooltipState.mouse-wy = self.absolute-position.y + self.mouse-y;
-                }
-                clicked => {
-                    root.copy-requested();
-                    root.copied = true;
-                    copy-timer.start();
-                }
+            Text {
+                text: root.key + "：";
+                font-size: Typography.label-size;
+                // 整行（key 与 value）必须用同一个字体族，见下方 value Text 的说明。
+                font-family: Typography.family-mixed;
+                color: Theme.text-secondary;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
             }
 
-            Text {
-                width: 100%;
-                text: root.copied ? "已复制" : root.display-value;
-                font-size: Typography.label-size;
-                color: root.copied ? Theme.success
-                    : (root.is-empty ? Theme.text-tertiary : root.value-color);
-                overflow: elide;
-                horizontal-alignment: right;
-                vertical-alignment: center;
+            Rectangle {
+                height: 20px;
+                horizontal-stretch: 1;
+
+                // 悬浮 → 显示全局单例浮层（内容区末尾统一渲染，见 TooltipState）；
+                // 点击 → 复制完整值（反馈：值文本短暂变为「已复制」）。
+                // changed/moved 里把鼠标窗口坐标写入 TooltipState：
+                //   TouchArea 的 mouse-x/y 是相对自身的偏移，必须加上
+                //   absolute-position 才是窗口坐标（Slint 官方 listview 同款换算）。
+                hover := TouchArea {
+                    changed has-hover => {
+                        TooltipState.text = root.value;
+                        TooltipState.visible = self.has-hover && !root.is-empty;
+                        TooltipState.mouse-wx = self.absolute-position.x + self.mouse-x;
+                        TooltipState.mouse-wy = self.absolute-position.y + self.mouse-y;
+                    }
+                    moved => {
+                        TooltipState.mouse-wx = self.absolute-position.x + self.mouse-x;
+                        TooltipState.mouse-wy = self.absolute-position.y + self.mouse-y;
+                    }
+                    clicked => {
+                        root.copy-requested();
+                        root.copied = true;
+                        copy-timer.start();
+                    }
+                }
+
+                Text {
+                    // width/height 都要 100%：值区是个固定 20px 高的盒子，
+                    // 只给 width 的话 Text 自身仍按固有行高从盒子顶部开始排，
+                    // 和左边的 key 就不再是同一套居中了。
+                    width: 100%;
+                    height: 100%;
+                    text: root.copied ? "已复制" : root.display-value;
+                    font-size: Typography.label-size;
+                    // 「key 和 value 不在一条水平线上」的根因：key 是中文（Segoe UI Variable
+                    // 没有汉字，会 fallback 到系统中文字体）、value 是英文/数字（走默认拉丁
+                    // 字体），两个字体族的行盒 ascent/descent 不同 —— 各自在本行高度里
+                    // 「居中」之后基线就错开了 2~3px。
+                    // 显式指定一个中西文都覆盖的字体族，两侧行盒度量完全一致，
+                    // 居中即等价于基线对齐。
+                    font-family: Typography.family-mixed;
+                    color: root.copied ? Theme.success
+                        : (root.is-empty ? Theme.text-tertiary : root.value-color);
+                    overflow: elide;
+                    // 值左对齐、紧跟在「字段名：」后面（原来右对齐贴列尾，
+                    // 两列并排时会让人误以为值和字段名不相关）。
+                    horizontal-alignment: left;
+                    vertical-alignment: center;
+                }
             }
         }
     }
@@ -1140,8 +1304,15 @@ component RouteOverlayCard {
                     }
                 }
             }
-            KeyValueRow { key: "网卡"; value: root.adapter-name; empty-text: "未选择"; copy-requested => { root.copy-value(root.adapter-name); } }
-            KeyValueRow { key: "旁路由 IP"; value: root.bypass-ip; copy-requested => { root.copy-value(root.bypass-ip); } }
+            // 字段左右排列成「一行两列」，不再从上到下堆叠。
+            // 两列严格等宽：KeyValueRow 组件根已统一 min-width: 0 + preferred-width: 0
+            // + horizontal-stretch: 1（三项一致才会被等分，见组件注释）。
+            HorizontalLayout {
+                spacing: Metrics.spacing-2xl;
+                horizontal-stretch: 1;
+                KeyValueRow { key: "网卡"; value: root.adapter-name; empty-text: "未选择"; copy-requested => { root.copy-value(root.adapter-name); } }
+                KeyValueRow { key: "旁路由 IP"; value: root.bypass-ip; copy-requested => { root.copy-value(root.bypass-ip); } }
+            }
         }
     }
 }
@@ -1203,10 +1374,21 @@ component AdapterReconfigCard {
                     }
                 }
             }
-            KeyValueRow { key: "网卡"; value: root.adapter-name; empty-text: "未选择"; copy-requested => { root.copy-value(root.adapter-name); } }
-            KeyValueRow { key: "网卡 IP"; value: root.ip; empty-text: "未获取"; copy-requested => { root.copy-value(root.ip); } }
-            KeyValueRow { key: "子网掩码"; value: root.mask; empty-text: "未获取"; copy-requested => { root.copy-value(root.mask); } }
-            KeyValueRow { key: "网关"; value: root.gateway; empty-text: "未获取"; copy-requested => { root.copy-value(root.gateway); } }
+            // 字段左右排列（两列等宽），不再从上到下堆叠：
+            //   「网卡 | 网卡 IP」「子网掩码 | 网关」两行；DNS 可能是一串逗号分隔的
+            //   地址（较长），单独占一整行，避免被 elide 截断。
+            HorizontalLayout {
+                spacing: Metrics.spacing-2xl;
+                horizontal-stretch: 1;
+                KeyValueRow { key: "网卡"; value: root.adapter-name; empty-text: "未选择"; copy-requested => { root.copy-value(root.adapter-name); } }
+                KeyValueRow { key: "网卡 IP"; value: root.ip; empty-text: "未获取"; copy-requested => { root.copy-value(root.ip); } }
+            }
+            HorizontalLayout {
+                spacing: Metrics.spacing-2xl;
+                horizontal-stretch: 1;
+                KeyValueRow { key: "子网掩码"; value: root.mask; empty-text: "未获取"; copy-requested => { root.copy-value(root.mask); } }
+                KeyValueRow { key: "网关"; value: root.gateway; empty-text: "未获取"; copy-requested => { root.copy-value(root.gateway); } }
+            }
             KeyValueRow { key: "DNS"; value: root.dns; empty-text: "未获取"; copy-requested => { root.copy-value(root.dns); } }
         }
     }
@@ -1546,7 +1728,12 @@ component HomePage {
 }
 
 component ConfigPage {
-    in-out property <int> mode-index;
+    // 草稿模式：卡片选中态与「网卡直改设置」表单项都由它驱动 —— 点卡片只改这里，
+    // 不会立刻影响真正生效的模式。只有点「保存并应用」成功后，Rust 侧才把它
+    // 提交给 AppWindow.mode-index（首页「当前模式」卡片读的是那个值）。
+    in-out property <int> draft-mode-index;
+    // 当前已生效的模式：仅用于在「草稿 ≠ 生效」时给出未保存提示。
+    in property <int> applied-mode-index;
     in property <[string]> adapter-names;
     in-out property <int> adapter-index;
     in-out property <string> bypass-ip-text;
@@ -1580,8 +1767,19 @@ component ConfigPage {
         horizontal-stretch: 1;
         vertical-stretch: 1;
 
-        // 提示条留在内容流里滚动：它是「操作结果反馈」，不是常驻操作，
-        // 固定在底栏反而会让底栏高度随有无提示跳动。
+        // 背景点击层：铺满整页、声明在 ScrollView 之前（z 序在下）。
+        // 只接收「没被卡片 / 输入框 / 按钮吃掉的点击」，收到就把键盘焦点交给
+        // focus-sink，输入框随之失焦 —— 即「点页面其他地方输入框失焦」。
+        // 能收到点击的依据：ScrollView 内部的 Flickable 是 interactive: false，
+        // 按下事件被它忽略后会继续往下传（滚轮不受影响，仍由 Flickable 处理）。
+        page-blur := TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { focus-sink.focus(); }
+        }
+
+        // 内容区铺满整页；保存结果 Toast 不在内容流里（见组件根 Rectangle 末尾），
+        // 所以这里只需要一个 ScrollView。
         ScrollView {
             x: 0;
             y: 0;
@@ -1606,7 +1804,7 @@ component ConfigPage {
                 CardBody {
                     SectionTitle {
                         text: "生效模式";
-                        hint: "两种模式互斥，同一时间只能使用一种。";
+                        hint: "两种模式互斥，同一时间只能使用一种；切换后需点击「保存并应用」才会生效。";
                     }
                     HorizontalLayout {
                         spacing: Metrics.spacing-md;
@@ -1616,18 +1814,27 @@ component ConfigPage {
                             title: "路由叠加";
                             desc: "不改动网卡设置，通过添加 0.0.0.0/1 与 128.0.0.0/1 两条路由把流量导向旁路由。切换快、可随时撤销。";
                             icon-data: Icons.layer;
-                            selected: root.mode-index == 0;
+                            selected: root.draft-mode-index == 0;
                             horizontal-stretch: 1;
-                            clicked => { root.mode-index = 0; }
+                            clicked => { root.draft-mode-index = 0; }
                         }
                         ModeCard {
                             title: "网卡直改";
                             desc: "直接把网卡 IP、网关、DNS 指向旁路由。兼容性更好，但会改动系统网络设置。";
                             icon-data: Icons.router;
-                            selected: root.mode-index == 1;
+                            selected: root.draft-mode-index == 1;
                             horizontal-stretch: 1;
-                            clicked => { root.mode-index = 1; }
+                            clicked => { root.draft-mode-index = 1; }
                         }
+                    }
+
+                    // 「选了但还没保存」：明确告知当前选择尚未生效，
+                    // 避免用户误以为点一下卡片就已经切换了模式。
+                    if root.draft-mode-index != root.applied-mode-index: InlineBanner {
+                        kind: 1;
+                        text: root.draft-mode-index == 0
+                            ? "已选择「路由叠加」，但尚未生效。点击底部「保存并应用」后切换。"
+                            : "已选择「网卡直改」，但尚未生效。点击底部「保存并应用」后切换。";
                     }
                 }
             }
@@ -1636,8 +1843,8 @@ component ConfigPage {
             Card {
                 CardBody {
                     SectionTitle {
-                        text: root.mode-index == 0 ? "旁路由设置" : "网卡直改设置";
-                        hint: root.mode-index == 0
+                        text: root.draft-mode-index == 0 ? "旁路由设置" : "网卡直改设置";
+                        hint: root.draft-mode-index == 0
                             ? "指定旁路由 IP，流量将通过该地址转发。"
                             : "指定旁路由 IP，并可直接改写网卡地址与 DNS。";
                     }
@@ -1665,7 +1872,9 @@ component ConfigPage {
                         }
                     }
 
-                    if root.mode-index == 1: VerticalLayout {
+                    // 直改专有字段跟随草稿模式显示（点卡片立刻展开/收起，但只有
+                    // 「保存并应用」后才会真正下发到核心服务）。
+                    if root.draft-mode-index == 1: VerticalLayout {
                         spacing: Metrics.spacing-lg;
                         FormRow {
                             label: "网卡静态 IP";
@@ -1796,18 +2005,26 @@ component ConfigPage {
                 }
             }
 
-            // ---- 保存结果提示（可关闭，避免长期占用视觉焦点；规范第 61 节）----
-            if root.config-error != "": InlineBanner {
-                text: root.config-error;
-                kind: root.config-error-kind;
-                show-close: true;
-                dismissed => { root.dismiss-config-error(); }
-            }
+            // 保存结果不再放在内容流里：改成右上角悬浮的 Toast（见组件根 Rectangle 末尾），
+            // 这样不会把卡片顶下去、也不会随滚动跑掉。
 
             // 内容区底部留白 = 底栏高度 + 间距：滚动到底时最后一张卡片
             // 能完整滚到悬浮操作栏上方，不会被遮挡。
             Rectangle { height: 60px + Metrics.spacing-xl; }
             }
+        }
+
+        // 焦点回收点：点内容区空白处时把键盘焦点收回到这里，等价于「输入框失焦」。
+        // 放在 ScrollView 外面有两个原因：
+        //   1) 它不该占内容流的位置，只是个焦点容器；
+        //   2) 覆盖整页的 FocusScope 一旦拿到焦点，外层 ScrollView 会把「聚焦元素」
+        //      滚进可视区 —— 元素巨大时页面会被滚到一个奇怪的位置（实测下滚约 100px）。
+        focus-sink := FocusScope {
+            x: 0px;
+            y: 0px;
+            width: 1px;
+            height: 1px;
+            focus-on-tab-navigation: false;
         }
 
         // ---- 操作区（悬浮吸附在内容区底部，不随页面滚动）----
@@ -1825,8 +2042,8 @@ component ConfigPage {
                 height: 100%;
                 alignment: center;
 
-                // 提示条不再固定：它属于「内容流」，留在 ScrollView 内滚动；
-                // 固定栏只放真正需要常驻的操作（保存 / 恢复默认）与保存结果。
+                // 固定栏只放真正需要常驻的操作（保存 / 恢复默认）与保存状态文案；
+                // 保存结果本身走右上角的 Toast，不占这里的位置。
                 HorizontalLayout {
                     padding-left: 20px;
                     padding-right: 32px;
@@ -1856,6 +2073,35 @@ component ConfigPage {
                     }
                 }
             }
+        }
+
+        // ---- 保存结果 Toast（悬浮在内容区右上角）----
+        // 声明在底栏之后 → 绘制层级最高，不会被卡片/底栏盖住。
+        // 定位用 max(...) 兜底：页面很窄时也不会把 Toast 顶出左边界。
+        if root.config-error != "": Toast {
+            x: max(ToastStyle.inset, parent.width - self.width - ToastStyle.inset);
+            y: 0px;
+            text: root.config-error;
+            kind: root.config-error-kind;
+            dismissed => { root.dismiss-config-error(); }
+        }
+    }
+
+    // Toast 自动消失：成功/信息到点就走，失败留久一点（错误要留够阅读时间）。
+    // Timer 不能声明 id，用实例名引用（Slint 1.14+ 限制）。
+    toast-timer := Timer {
+        interval: root.config-error-kind == 2 ? ToastStyle.auto-dismiss-error
+            : ToastStyle.auto-dismiss;
+        running: false;
+        triggered => { root.dismiss-config-error(); }
+    }
+
+    // 提示文案一变化就重新计时：连续保存两次都能看到完整的展示时长。
+    changed config-error => {
+        if root.config-error != "" {
+            toast-timer.start();
+        } else {
+            toast-timer.stop();
         }
     }
 }
@@ -2210,7 +2456,14 @@ export component AppWindow inherits Window {
     in property <string> selected-adapter-dns: "--";
 
     in-out property <string> bypass-ip-text: "";
+    // 真正「生效」的模式：首页「当前模式」卡片读的就是它。
+    // 只由 Rust 侧写入 —— 加载/重连时来自核心服务的配置，保存成功后由草稿提交；
+    // 配置页点卡片改的是 draft-mode-index，不会直接改到这里。
     in-out property <int> mode-index: 0;
+    // 配置页草稿模式：与配置页的卡片选中态双向同步。离开配置页再回来会被重置为
+    // 当前生效模式（见侧栏「配置」与首页「前往配置」的点击处理），
+    // 保证「切换后没保存」的选择不会残留到下次进入配置页。
+    in-out property <int> draft-mode-index: 0;
     in-out property <string> static-ip-text: "";
     in-out property <string> mask-text: "";
     in-out property <string> dns-text: "";
@@ -2319,7 +2572,9 @@ export component AppWindow inherits Window {
                     icon-data: Icons.settings;
                     label: "配置";
                     selected: root.current-page == 1;
-                    clicked => { root.current-page = 1; }
+                    // 进入配置页时把草稿重置为当前生效模式：先写草稿再切页，
+                    // 保证页面元素创建时读到的就是重置后的值。
+                    clicked => { root.draft-mode-index = root.mode-index; root.current-page = 1; }
                 }
                 SidebarItem {
                     icon-data: Icons.logs;
@@ -2396,14 +2651,15 @@ export component AppWindow inherits Window {
                     adapter-name: root.selected-adapter-name;
                     service-lost: root.service-lost;
                     toggle => { root.toggle-bypass(); }
-                    switch-mode => { root.current-page = 1; }
+                    switch-mode => { root.draft-mode-index = root.mode-index; root.current-page = 1; }
                     copy-value(text) => { root.copy-value(text); }
                 }
 
                 if root.current-page == 1: ConfigPage {
                     horizontal-stretch: 1;
                     vertical-stretch: 1;
-                    mode-index <=> root.mode-index;
+                    draft-mode-index <=> root.draft-mode-index;
+                    applied-mode-index: root.mode-index;
                     adapter-names: root.adapter-names;
                     adapter-index <=> root.adapter-index;
                     bypass-ip-text <=> root.bypass-ip-text;
